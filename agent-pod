@@ -128,6 +128,11 @@ fi
 # Host-side state dir: persists the agent's auth + history across container restarts.
 mkdir -p "$A_STATE_DIR"
 
+# The pod can write to the state dir. A symlink it leaves in place of the config file would make the host-side
+# steps below (seeding, chmod) and Docker's bind mount follow it to a file outside the project, such as an SSH key.
+[ ! -L "$A_STATE_DIR/$A_CFG_FILE" ] \
+  || die "$A_STATE_DIR/$A_CFG_FILE is a symbolic link. A session may have created it; check where it points and delete it."
+
 # The agent reads its main config from $HOME/$A_CFG_FILE (a file at HOME, sibling to the $A_CFG_DIR/ directory).
 # We bind-mount this file separately so login state survives. Two quirks:
 #   - Docker creates a directory at the target if the source path is missing, so the file must
@@ -153,11 +158,10 @@ chmod 600 "$A_STATE_DIR/$A_CFG_FILE"
 # TTY Detection:
 #   If we pipe data into the script (e.g. `cat file | agent-pod claude`), input is not a terminal.
 #   Passing `-t` to Docker in this case would cause a crash.
-#   [ -t 0 ] checks if STDIN is a terminal. If yes, keep it interactive (-i).
-#   [ -t 1 ] checks if STDOUT is a terminal. If yes, allocate a pseudo-TTY (-t).
-DOCKER_FLAGS=("--rm")
-[ -t 0 ] && DOCKER_FLAGS+=("-i")
-[ -t 1 ] && DOCKER_FLAGS+=("-t")
+#   Stdin is always attached (-i), or piped and redirected input would be discarded.
+#   A pseudo-TTY (-t) is allocated only when both STDIN and STDOUT are terminals.
+DOCKER_FLAGS=("--rm" "-i")
+{ [ -t 0 ] && [ -t 1 ]; } && DOCKER_FLAGS+=("-t")
 
 # Optional Port Mapping:
 #   Allows users to map dev servers by passing PORTS="3000 8080:80".

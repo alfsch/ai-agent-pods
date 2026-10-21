@@ -484,6 +484,20 @@ test_lazy_build() {   # a missing image is built by install.sh (next to the laun
   LAUNCHER="$d/agent-pod" launch STUB_NO_IMAGE=1 -- true; rc_is 1; in_out 'Could not build the image'; not_logged '^run '
 }
 
+test_stdin_attached() {   # piped or redirected input reaches the pod: -i always, -t only with a terminal on both ends
+  setup_case; launch DOCKER=1 -- true
+  rc_is 0; logged '^run --rm -i '; not_logged '^run --rm .* -t '
+  setup_case; launch -- true
+  rc_is 0; logged '^run --rm -i '
+}
+test_config_symlink() {   # a symlink left in the writable state dir must not be followed on the host
+  setup_case; mkdir -p "$H/.claude-pod"; printf 'secret' > "$CASE/secret"; chmod 644 "$CASE/secret"
+  ln -s "$CASE/secret" "$H/.claude-pod/.claude.json"
+  AGENT=claude launch -- true
+  rc_is 1; in_out 'symbolic link'; not_logged '^run '
+  [ "$(ls -l "$CASE/secret" | cut -c1-10)" = "-rw-r--r--" ] || fail "the host file behind the symlink was chmodded"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the launcher)
   local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
@@ -542,6 +556,8 @@ run_mutants() {
   mutate test_lazy_build    'if [ -z "$(docker image ls -q "$IMAGE" 2>/dev/null)" ]; then
   printf' 'if true; then
   printf' || rc=1
+  mutate test_stdin_attached 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm")' || rc=1
+  mutate test_config_symlink '[ ! -L "$A_STATE_DIR/$A_CFG_FILE" ] \' 'true \' || rc=1
   return $rc
 }
 
