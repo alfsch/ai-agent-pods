@@ -47,6 +47,8 @@ usage() {
   printf '\n'
   row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
   row ""                   "alias copilot-pod=$HERE/copilot-pod"
+  row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod (login, history)"
+  row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/<agent>.json (trust state)"
   row "Full README:"       "https://github.com/alfsch/ai-agent-pods"
 }
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then usage; exit 0; fi

@@ -12,6 +12,9 @@ are in `README.md`.
   mentions an agent by name is a bug: the sidecar, cache and signal logic are the same for both.
 - State dirs stay `~/.claude-pod` and `~/.copilot-pod` so existing logins keep working; the container home is
   `/home/agent-pod` for both. The Docker cache is per project, not per agent.
+- The agent's config file (`.claude.json`, `.copilot.json`) lives in `~/.config/agent-pod/<agent>.json`, never in
+  the state dir: the pod can write to the state dir and could leave a symlink in place of the file. The pod gets
+  the file, not its directory. Do not move it back.
 - Without the image of an agent the launcher builds it with `install.sh` (next to the real script, symlinks resolved).
 
 ## Before changing the Docker sidecar (`DOCKER=1` / `DOCKER_CACHE=1`)

@@ -66,6 +66,17 @@ claude-pod claude --dangerously-skip-permissions     # note: the command is stil
 
 Run `/login` in the agent and follow the prompt. The session persists in the agent's state dir and survives restarts, once per machine. The dirs keep the names of the single-agent tools ([claude-pod](https://github.com/trekhleb/claude-pod), copilot-pod), so existing logins carry over. For Copilot you can export a token on the host instead; it is then visible to everything in the container.
 
+### Where settings live
+
+Everything is on the host, once for all projects, and you change it by editing the files there:
+
+| What | Claude Code | Copilot CLI |
+|---|---|---|
+| Login, settings, session history | `~/.claude-pod/` | `~/.copilot-pod/` |
+| Account binding, project trust state | `~/.config/agent-pod/claude.json` | `~/.config/agent-pod/copilot.json` |
+
+The config files are under `$XDG_CONFIG_HOME` if that is set. They are deliberately not in the state dirs (see [Side effects](#side-effects-outside-the-project-folder)). `agent-pod --help` prints the paths. Launcher options such as `DOCKER=1` are not stored anywhere: set them per run, or in an alias.
+
 ### Options
 
 All of them are environment variables in front of the launcher:
