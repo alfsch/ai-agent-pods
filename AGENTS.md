@@ -72,6 +72,10 @@ test that fails without it.
   not `docker build --pull`, which fails hard. A change to `Dockerfile.base` or `pod-environment.md` reaches users only
   after `publish-base.yaml` has run on `main`; until then the pull fails and they build it. Pull requests build it
   locally, they cannot publish.
+- The agent layer of `Dockerfile` runs `<agent> --version` and installs again (three tries) when that fails: npm can
+  succeed while the agent's platform-specific optional package did not download, and the CLI then only says "no platform
+  package found" when it runs (seen as a flaky integration test). Do not drop the check or the retries; `install.sh`
+  verifies the finished image again on purpose.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.

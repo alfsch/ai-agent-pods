@@ -11,6 +11,7 @@ trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
+DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
 
@@ -201,7 +202,9 @@ launch_bg() { # same, background; sets LPID
 finish_bg() { RC=0; wait "$LPID" || RC=$?; kill "$WD" 2>/dev/null; wait "$WD" 2>/dev/null; return 0; }
 logged()    { grep -qE -- "$1" "$STUB_LOG" || fail "expected docker call matching: $1"; }
 not_logged(){ ! grep -qE -- "$1" "$STUB_LOG" || fail "unexpected docker call matching: $1"; }
-in_out()    { cat "$CASE/out" "$CASE/err" | grep -qE -- "$1" || fail "expected output matching: $1"; }
+# No pipe from cat: with pipefail, a grep -q that stops at an early match leaves cat writing into a closed pipe, which on
+# macOS ends as "cat: stdout: Broken pipe" and a failed pipeline although the text was found (a flaky test_base_image).
+in_out()    { grep -qE -- "$1" "$CASE/out" "$CASE/err" || fail "expected output matching: $1"; }
 rc_is()     { [ "$RC" = "$1" ] || fail "exit code $RC, expected $1"; }
 order() {    # order <regex>... : first match of each appears in this order
   local last=0 n re; for re in "$@"; do
@@ -647,10 +650,39 @@ test_base_image() {   # install.sh pulls the published base; a failed pull uses 
   inst AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged "^pull $TAG\$"; logged '^pull node:9-slim$'; logged '^build .*-f .*Dockerfile.base'
 }
 
+test_agent_install_layer() {   # the install layer of Dockerfile runs the agent and reinstalls when it does not start
+  local d body
+  # the RUN instruction that installs the agent, as one shell command (its lines end with a backslash)
+  body="$(awk '/^RUN for i in/ { f = 1 } f { print } f && !/\\$/ { exit }' "$DOCKERFILE" | sed 's/^RUN //; s/\\$//' | tr '\n' ' ')"
+  [ -n "$body" ] || fail "no install layer found in $DOCKERFILE"
+  layer() {   # layer <VAR=value>... : runs it with a stub npm, a stub agent that fails AGENT_FAILS times and no waiting
+    setup_case; d="$CASE/stubs"; mkdir -p "$d"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "npm $*" >> "$STUB_LOG"' '[ "$1" != install ] || { n="$(cat "$STUB_DIR/npm-installs" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$STUB_DIR/npm-installs"; [ "$((n + 1))" -gt "${NPM_FAILS:-0}" ]; }' > "$d/npm"
+    printf '%s\n' '#!/usr/bin/env bash' 'n="$(cat "$STUB_DIR/agent-runs" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$STUB_DIR/agent-runs"' \
+      'echo "agent $*" >> "$STUB_LOG"; [ "$((n + 1))" -gt "${AGENT_FAILS:-0}" ] || { echo "no platform package found" >&2; exit 1; }' > "$d/claude"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "sleep $*" >> "$STUB_LOG"' > "$d/sleep"
+    chmod +x "$d/npm" "$d/claude" "$d/sleep"
+    RC=0; env PATH="$d:$PATH" AGENT_PKG=pkg AGENT_VERSION=1.2.3 AGENT=claude "$@" sh -c "$body" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  }
+  installs() { grep -c '^npm install' "$STUB_LOG" || true; }
+  # a healthy install: once, no reinstall
+  layer; rc_is 0; [ "$(installs)" = 1 ] || fail "a healthy install ran npm install $(installs) times"; not_logged '^npm uninstall'; not_logged '^sleep'
+  logged '^npm install -g pkg@1.2.3$'; logged '^agent --version$'
+  # the agent does not start the first time: the package is removed and installed again, then it works
+  layer AGENT_FAILS=1; rc_is 0; [ "$(installs)" = 2 ] || fail "expected 2 installs, got $(installs)"; logged '^npm uninstall -g pkg$'; in_out 'Attempt 1 of installing pkg@1.2.3 failed'
+  [ "$(grep -v '^sleep' "$STUB_LOG" | tr '\n' ',')" = 'npm install -g pkg@1.2.3,agent --version,npm uninstall -g pkg,npm install -g pkg@1.2.3,agent --version,' ] \
+    || fail "the calls were not install, run, uninstall, install, run"
+  # npm itself fails the first time: also tried again
+  layer NPM_FAILS=1; rc_is 0; [ "$(installs)" = 2 ] || fail "expected 2 installs after an npm failure, got $(installs)"
+  # it never starts: three tries, then the build fails
+  layer AGENT_FAILS=99; [ "$RC" != 0 ] || fail "a build with an agent that never starts succeeded"
+  [ "$(installs)" = 3 ] || fail "expected 3 installs, got $(installs)"; in_out 'Attempt 3 of installing pkg@1.2.3 failed'
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  [ "$file" != install.sh ] || var=INSTALLER
+  case "$file" in install.sh) var=INSTALLER ;; Dockerfile) var=DOCKERFILE ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -735,6 +767,11 @@ run_mutants() {
   mutate test_base_image '  refresh_from
   info "Building' '  info "Building' install.sh || rc=1
   mutate test_base_image $'\nensure_base\n' $'\n:\n' install.sh || rc=1
+  mutate test_agent_install_layer ' && ${AGENT} --version && exit 0;' ' && exit 0;' Dockerfile || rc=1
+  mutate test_agent_install_layer 'for i in 1 2 3; do' 'for i in 1; do' Dockerfile || rc=1
+  mutate test_agent_install_layer $'    done; \\\n    exit 1' $'    done; \\\n    exit 0' Dockerfile || rc=1
+  mutate test_agent_install_layer ' && ${AGENT} --version && exit 0;' ' && ${AGENT} --version;' Dockerfile || rc=1
+  mutate test_agent_install_layer 'npm uninstall -g ${AGENT_PKG} >/dev/null 2>&1 || true;' 'true;' Dockerfile || rc=1
   return $rc
 }
 
