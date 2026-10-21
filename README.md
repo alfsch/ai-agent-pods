@@ -113,7 +113,7 @@ The agent only sees files inside the project folder. Copy the screenshot into th
 
 ### Customizing the image
 
-Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + `yq` + the `docker` CLI (+ compose, buildx) + `python3` + `pip` + `venv` + `pdftotext` + `qpdf` + `tesseract` (English, German) + the agent. Anything else your projects need you add yourself: edit the `Dockerfile` and re-run `install.sh`.
+Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + `yq` + the `docker` CLI (+ compose, buildx) + `python3` + `pip` + `venv` + `pdftotext` + `qpdf` + `tesseract` (English, German) + the agent. Anything else your projects need you add yourself: edit the `Dockerfile` and re-run `install.sh`. Claude Code and Copilot CLI are told what is in the image, and what is not possible in the container (no root, Docker only with `DOCKER=1`), by [`pod-environment.md`](pod-environment.md), which the image carries where each tool reads it. Keep its "Tools on PATH" line in line with the Dockerfile; the integration tests check every tool on it.
 
 ## Security and limits
 
