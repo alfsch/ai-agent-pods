@@ -117,6 +117,11 @@ for a in claude copilot; do
   check "agent-pod:$a has no AGENTS.md in /etc/agent-pod" bash -c 'docker run --rm "$0" test ! -e /etc/agent-pod/AGENTS.md' "agent-pod:$a"
   check "agent-pod:$a points Copilot at /etc/agent-pod" bash -c 'docker run --rm "$0" sh -c "echo \$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" | grep -qx /etc/agent-pod' "agent-pod:$a"
 done
+# the label that makes the launcher rebuild a stale image is the hash install.sh computes now
+for a in claude copilot; do
+  # both values are fetched with their exit status and must be non-empty: two empty strings are not "the same hash"
+  check "agent-pod:$a was built from the current repo (label agent-pod.build)" bash -c 'l="$(docker image inspect --format "{{index .Config.Labels \"agent-pod.build\"}}" "$0")" || exit 1; w="$("$1/install.sh" --build-hash)" || exit 1; [ -n "$w" ] && [ "$l" = "$w" ]' "agent-pod:$a" "$ROOT"
+done
 check "agent-pod:claude does not carry Copilot CLI" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:claude copilot
 check "agent-pod:copilot does not carry Claude Code" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:copilot claude
 

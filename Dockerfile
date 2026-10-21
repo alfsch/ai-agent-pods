@@ -39,7 +39,9 @@ RUN npm install -g ${AGENT_PKG}@${AGENT_VERSION}
 # version on that channel. Declared after the install so changing them doesn't invalidate that layer.
 ARG AGENT=
 ARG AGENT_CHANNEL=${AGENT_VERSION}
+ARG BUILD_HASH=
 LABEL agent-pod.agent=${AGENT} \
+      agent-pod.build=${BUILD_HASH} \
       agent-pod.channel=${AGENT_CHANNEL} \
       agent-pod.version=${AGENT_VERSION}
 

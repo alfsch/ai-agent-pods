@@ -10,6 +10,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
+INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
 
@@ -34,7 +35,7 @@ AGENT="${AGENT-claude}"
 #                         the client keeps writing for N seconds; like Docker's client it survives two signals
 #                         and exits 1 on the third (client-killed)
 #   STUB_STOP_ERROR_AT=N  the Nth `docker stop` of the pod fails with an error other than "No such container"
-#   STUB_CHANNEL / STUB_VERSION   the agent-pod.channel / agent-pod.version labels of the image;
+#   STUB_CHANNEL / STUB_VERSION / STUB_BUILD   the agent-pod.channel / .version / .build labels of the image;
 #                         STUB_VERSION_OUT is what `<agent> --version` prints in it
 #   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
@@ -47,7 +48,7 @@ case "$1" in
   image)
     # image labels, for the update check
     if [ "$2" = inspect ]; then
-      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; esac
+      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; *agent-pod.build*) echo "${STUB_BUILD:-}" ;; esac
       exit 0
     fi
     if [[ "$*" == *agent-pod-dind* ]]; then
@@ -559,14 +560,64 @@ test_stdin_reaches_pod() {   # piped input arrives in the pod, also from the bac
   done
 }
 
+test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash label) is rebuilt on the next start, keeping its pin
+  local d
+  rb() {   # rb <agent> <VAR=value>... : runs the launcher with a stub install.sh that answers --build-hash with "new"
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
+    printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = --build-hash ]; then echo new; exit 0; fi' \
+      'echo "install.sh $*" >> "$STUB_LOG"; echo "pin ${CLAUDE_CODE_VERSION:-}${COPILOT_CLI_VERSION:-}" >> "$STUB_LOG"; exit "${STUB_INSTALL_EXIT:-0}"' > "$d/install.sh"
+    chmod +x "$d/install.sh"
+    local a="$1"; shift
+    AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= "$@" -- true
+  }
+  # a different hash: rebuilt once, before the pod starts, with the channel the image was built from
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "the image was not rebuilt exactly once"
+  order '^install.sh claude$' '^run --rm .*agent-pod:claude true$'; logged '^pin stable$'; in_out 'repository changed'
+  # an image without the label (built before it existed) is rebuilt too
+  rb copilot STUB_BUILD= STUB_CHANNEL=latest; rc_is 0; logged '^install.sh copilot$'
+  # a pinned image keeps its version
+  rb copilot STUB_BUILD=old STUB_CHANNEL=1.2.3; rc_is 0; logged '^pin 1.2.3$'
+  # the same hash: nothing is rebuilt
+  rb claude STUB_BUILD=new STUB_CHANNEL=stable STUB_VERSION=9.9.9; rc_is 0; not_logged '^install.sh'
+  # opt-out
+  rb claude STUB_BUILD=old AGENT_POD_NO_UPDATE=1; rc_is 0; not_logged '^install.sh'
+  # a failed rebuild does not stop the start
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=9.9.9 STUB_INSTALL_EXIT=1; rc_is 0
+  in_out 'Rebuild failed'; logged '^run --rm .*agent-pod:claude true$'
+  # ... and the release check does not repeat it, although a newer release exists (installed version is outdated)
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=1.0.0 STUB_INSTALL_EXIT=1; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "a failed rebuild was tried a second time by the release check"
+  logged '^run --rm .*agent-pod:claude true$'
+  # after a rebuild the release check does not run (it would rebuild a second time)
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=1.0.0; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "rebuilt twice: once for the repository, once for a release"
+}
+
+test_build_hash() {   # the hash install.sh stores in the image changes with each of its inputs and with nothing else
+  local d h0 h1 h2 h
+  setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'a\n' > "$d/pod-environment.md"
+  h0="$("$d/install.sh" --build-hash)" || fail "--build-hash failed"
+  [[ "$h0" =~ ^[0-9a-f]{16}$ ]] || fail "not 16 hex characters: '$h0'"
+  [ "$("$d/install.sh" --build-hash)" = "$h0" ] || fail "the hash is not stable for the same inputs"
+  printf 'FROM y\n' > "$d/Dockerfile"; h1="$("$d/install.sh" --build-hash)"
+  [ -n "$h1" ] && [ "$h1" != "$h0" ] || fail "a changed Dockerfile did not change the hash"
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'b\n' > "$d/pod-environment.md"; h2="$("$d/install.sh" --build-hash)"
+  [ -n "$h2" ] && [ "$h2" != "$h0" ] && [ "$h2" != "$h1" ] || fail "a changed pod-environment.md did not change the hash"
+  printf 'a\n' > "$d/pod-environment.md"; h="$("$d/install.sh" --build-hash)"
+  [ "$h" = "$h0" ] || fail "restoring the inputs did not restore the hash"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
-mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the launcher)
-  local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
+mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
+  local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
+  [ "$file" != install.sh ] || var=INSTALLER
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
   printf '%s' "${src/"$old"/"$new"}" > "$T/mutant"; chmod +x "$T/mutant"
-  if ( LAUNCHER="$T/mutant" "$0" --inner "$test" >/dev/null 2>&1 ); then
+  if ( export "$var=$T/mutant"; "$0" --inner "$test" >/dev/null 2>&1 ); then
     echo "  SURVIVED  $test passes without: ${old%%$'\n'*}"; return 1
   fi
   echo "  killed    $test fails without: ${old%%$'\n'*}"
@@ -625,6 +676,13 @@ run_mutants() {
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
   mutate test_stdin_reaches_pod '"${RUN_CMD[@]}" <&0 &' '"${RUN_CMD[@]}" &' || rc=1
+  mutate test_rebuild_on_repo_change '"$(_label agent-pod.build)" != "$_want"' '"$(_label agent-pod.build)" = "$_want"' || rc=1
+  mutate test_rebuild_on_repo_change '"$A_VERSION_VAR=${_asked:-$A_CHANNEL}"' '"$A_VERSION_VAR=$A_CHANNEL"' || rc=1
+  mutate test_rebuild_on_repo_change 'if [ -z "$_tried" ] && command -v curl' 'if command -v curl' || rc=1
+  mutate test_rebuild_on_repo_change '_tried=1   # whatever the outcome' ': # whatever the outcome' || rc=1
+  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/Dockerfile"' install.sh || rc=1
+  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/pod-environment.md"' install.sh || rc=1
+  mutate test_build_hash '| cut -c1-16' "| cut -c1-16 | sed 's/.*/0123456789abcdef/'" install.sh || rc=1
   return $rc
 }
 
