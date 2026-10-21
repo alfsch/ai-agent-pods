@@ -2,6 +2,8 @@
 
 > Docker sandbox for AI coding agents: [Claude Code](https://www.anthropic.com/claude-code) and the [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli), one launcher for both. Runs the agent against one project folder, so your home directory, SSH keys and other projects stay invisible to the container. Unofficial.
 
+![claude-pod and copilot-pod](assets/cover.webp)
+
 ## TL;DR
 
 `agent-pod` runs an agent inside a Docker container that mounts the project folder you launch it from. The agent can read and edit that folder; the rest of your machine (home directory, SSH keys, other projects, host shell) is not mounted. The image of an agent contains only that agent: `agent-pod:claude` has Claude Code, `agent-pod:copilot` has Copilot CLI.
@@ -161,6 +163,6 @@ Lists what it removes and what it leaves (the `node:24-slim` image, build cache,
 
 ### License and trademarks
 
-MIT, see [`LICENSE`](LICENSE). Derived from [trekhleb/claude-pod](https://github.com/trekhleb/claude-pod) by Oleksii Trekhleb (MIT); the Copilot CLI and unified-launcher parts are by Alfred Schmid.
+MIT, see [`LICENSE`](LICENSE). The cover image was generated with AI (Microsoft Bing Image Creator). Derived from [trekhleb/claude-pod](https://github.com/trekhleb/claude-pod) by Oleksii Trekhleb (MIT); the Copilot CLI and unified-launcher parts are by Alfred Schmid.
 
 Claude Code is a product of Anthropic, PBC; Copilot CLI of GitHub, Inc. (Microsoft). Neither is redistributed here: `install.sh` fetches them from npm at build time. This project is not affiliated with, endorsed by or sponsored by either company; their names are trademarks of their owners, used nominatively. No logos or brand assets are used.

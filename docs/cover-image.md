@@ -1,7 +1,7 @@
 # Cover image
 
-The README has no cover image yet. The one of copilot-pod was made with Bing Image Creator; this is the prompt for
-the picture of both pods, and how to add the result.
+The cover image `assets/cover.webp` was made with Bing Image Creator from the prompt below, which also makes it
+reproducible or changeable. The picture of copilot-pod was made the same way.
 
 Reference look (copilot-pod): a black matte cylindrical base with a small light label, a clear glass dome, a glass
 sphere inside with softly glowing eyes, dark charcoal background, a soft reflective floor, studio product shot.
@@ -26,8 +26,7 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
 - To make the spheres differ in shape as well, add: "left sphere with a rounder, friendlier face, right sphere with a
   more angular, technical look".
 
-## Adding the result
+## Replacing the image
 
-1. Save it as `assets/cover.jpeg` (3:2, about 1250 px wide is enough).
-2. Put `![claude-pod and copilot-pod](assets/cover.jpeg)` below the title line of `README.md`.
-3. In the README's license section, say that the cover image was generated with AI (Microsoft Bing Image Creator).
+Save the new picture as `assets/cover.webp` (3:2, about 1250 px wide is enough; keep the name, or change the link in
+the README). The README's license section says that the image was generated with AI; keep that line.
