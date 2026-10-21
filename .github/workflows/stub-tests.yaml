@@ -27,24 +27,16 @@ jobs:
         with:
           persist-credentials: false
 
-      # One `bash -n` per file: with several names it parses only the first and takes the rest as arguments.
+      # The checks are in tests/check.sh, so that a developer runs exactly what CI runs.
       - name: Syntax check
-        run: |
-          rc=0
-          for f in agent-pod install.sh uninstall.sh tests/stubbed-docker.sh tests/integration.sh; do
-            bash -n "$f" || rc=1
-          done
-          exit "$rc"
+        run: tests/check.sh syntax
 
-      # Pinned image, so a new ShellCheck version cannot fail a pull request on its own.
       - name: ShellCheck
-        run: >
-          docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0
-          -S warning agent-pod install.sh uninstall.sh tests/stubbed-docker.sh tests/integration.sh
+        run: tests/check.sh shellcheck
 
       # Tests, then the mutants: each launcher with one fix removed must make a test fail.
       - name: Stub tests
-        run: tests/stubbed-docker.sh
+        run: tests/check.sh tests
 
   # The same tests on macOS: the system Bash 3.2 and the BSD userland (no timeout, GNU date or touch -d), which the
   # Linux job never sees. The system Bash comes first in PATH so that the launcher's `env bash` shebang is it, too.
@@ -63,12 +55,7 @@ jobs:
           command -v timeout || echo "no timeout(1), as on a Mac"
 
       - name: Syntax check with the system Bash 3.2
-        run: |
-          rc=0
-          for f in agent-pod install.sh uninstall.sh tests/stubbed-docker.sh tests/integration.sh; do
-            /bin/bash -n "$f" || rc=1
-          done
-          exit "$rc"
+        run: /bin/bash tests/check.sh syntax
 
       - name: Stub tests
         run: PATH=/bin:/usr/bin:$PATH /bin/bash tests/stubbed-docker.sh --no-mutants
