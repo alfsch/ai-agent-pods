@@ -79,6 +79,10 @@ test that fails without it.
   base published from another branch is rightly rejected. Only the default repository is checked. After a successful
   check `BASE_IMAGE` is the verified digest, so the agent images are built from the bytes that were checked and not
   from a tag that another install could retarget meanwhile.
+- The agent layer of `Dockerfile` runs `<agent> --version` and installs again (three tries) when that fails: npm can
+  succeed while the agent's platform-specific optional package did not download, and the CLI then only says "no platform
+  package found" when it runs (seen as a flaky integration test). Do not drop the check or the retries; `install.sh`
+  verifies the finished image again on purpose.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.
