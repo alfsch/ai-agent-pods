@@ -128,24 +128,30 @@ fi
 # Host-side state dir: persists the agent's auth + history across container restarts.
 mkdir -p "$A_STATE_DIR"
 
-# The pod can write to the state dir. A symlink it leaves in place of the config file would make the host-side
-# steps below (seeding, chmod) and Docker's bind mount follow it to a file outside the project, such as an SSH key.
-[ ! -L "$A_STATE_DIR/$A_CFG_FILE" ] \
-  || die "$A_STATE_DIR/$A_CFG_FILE is a symbolic link. A session may have created it; check where it points and delete it."
+# The agent reads its main config (account binding, project trust state) from $HOME/$A_CFG_FILE, a file at HOME next
+# to the $A_CFG_DIR/ directory. It is one file per agent on the host, used by every project and every session, and
+# edited there: ${XDG_CONFIG_HOME:-~/.config}/agent-pod/<agent>.json. It lives outside the state dir on purpose: the
+# pod can write to the state dir, and a symlink it left in place of the file would make the host-side steps here and
+# Docker's bind mount follow it to a file outside the project, such as an SSH key. The pod gets the file, never
+# the directory around it, so it cannot replace it.
+A_CFG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod"
+A_CFG_PATH="$A_CFG_HOME/$AGENT.json"
+mkdir -p "$A_CFG_HOME"
+# Earlier versions kept the file in the state dir: copy it over once, so logins survive. Only a regular file is
+# copied; the old one may have been replaced by the pod.
+if [ ! -e "$A_CFG_PATH" ] && [ -f "$A_STATE_DIR/$A_CFG_FILE" ] && [ ! -L "$A_STATE_DIR/$A_CFG_FILE" ]; then
+  cp "$A_STATE_DIR/$A_CFG_FILE" "$A_CFG_PATH"
+fi
+# Docker creates a directory at the target if the source path is missing, so the file must pre-exist on the host
+# before `docker run`. The agent treats an empty file as a JSON parse error, not as "no config", so seed it with {}.
+[ -s "$A_CFG_PATH" ] || printf '{}' > "$A_CFG_PATH"
 
-# The agent reads its main config from $HOME/$A_CFG_FILE (a file at HOME, sibling to the $A_CFG_DIR/ directory).
-# We bind-mount this file separately so login state survives. Two quirks:
-#   - Docker creates a directory at the target if the source path is missing, so the file must
-#     pre-exist on the host before `docker run`.
-#   - The agent treats an empty file as a JSON parse error, not as "no config", so we seed it with {}.
-[ -s "$A_STATE_DIR/$A_CFG_FILE" ] || printf '{}' > "$A_STATE_DIR/$A_CFG_FILE"
-
-# Restrict to owner-only. The directory holds the agent's auth token and session transcripts
+# Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
 # (which can contain code, file contents, and command output the agent saw); on multi-user hosts the
 # default 755/644 modes would let other local users read both. Matches the convention used for
 # ~/.ssh, ~/.aws, ~/.gnupg.
-chmod 700 "$A_STATE_DIR"
-chmod 600 "$A_STATE_DIR/$A_CFG_FILE"
+chmod 700 "$A_STATE_DIR" "$A_CFG_HOME"
+chmod 600 "$A_CFG_PATH"
 
 # Mounts & Users:
 #   --user -> dynamic                            Runs container exactly as the host user to prevent permission issues.
@@ -154,7 +160,7 @@ chmod 600 "$A_STATE_DIR/$A_CFG_FILE"
 #                                                references (logs, errors, tool output) consistent
 #                                                between host and container.
 #   $A_STATE_DIR -> /home/agent-pod/$A_CFG_DIR   credentials, sessions, history (the agent's state dir).
-#   $A_STATE_DIR/$A_CFG_FILE -> ditto            account binding + project trust state (sibling file).
+#   $A_CFG_PATH -> /home/agent-pod/$A_CFG_FILE   account binding + project trust state (sibling file).
 # TTY Detection:
 #   If we pipe data into the script (e.g. `cat file | agent-pod claude`), input is not a terminal.
 #   Passing `-t` to Docker in this case would cause a crash.
@@ -450,7 +456,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   -v "$PWD:$PWD" \
   -w "$PWD" \
   -v "$A_STATE_DIR:/home/agent-pod/$A_CFG_DIR" \
-  -v "$A_STATE_DIR/$A_CFG_FILE:/home/agent-pod/$A_CFG_FILE" \
+  -v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE" \
   "$IMAGE" "$@")
 
 # Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay

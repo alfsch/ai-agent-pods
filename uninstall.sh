@@ -12,7 +12,8 @@ die()  { err "$*"; trap - ERR; exit 1; }
 trap 'err "uninstall.sh failed at line $LINENO"' ERR
 
 # The state dirs keep the names of the single-agent tools, so existing logins carry over.
-STATE_DIRS=("$HOME/.claude-pod" "$HOME/.copilot-pod")
+# The config files (login binding, trust state) are in the config dir.
+STATE_DIRS=("$HOME/.claude-pod" "$HOME/.copilot-pod" "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod")
 IMAGES=(agent-pod:claude agent-pod:copilot)
 
 info "Will remove"

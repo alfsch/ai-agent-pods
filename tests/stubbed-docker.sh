@@ -164,7 +164,7 @@ setup_case() {
   export STUB_LOG="$CASE/docker.log" STUB_DIR="$CASE/stub"; mkdir -p "$STUB_DIR"; : > "$STUB_LOG"
   HASH="$(cd "$PROJ" && { pwd -P; echo 1000:1000; } | sha16)"   # the stub reports uid and gid 1000
 }
-launch_env() { cd "$PROJ" && HOME="$H" XDG_STATE_HOME="$H/state" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
+launch_env() { cd "$PROJ" && HOME="$H" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
 launch() {   # launch <env VAR=...>... -- args   (foreground; sets RC)
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
   RC=0; (launch_env env ${envs[@]+"${envs[@]}"} timeout 60 "$LAUNCHER" ${AGENT:+"$AGENT"} "$@" </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
@@ -449,13 +449,13 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   setup_case; AGENT=claude launch -- true
   rc_is 0
   logged " -e DISABLE_AUTOUPDATER=1 "; not_logged 'COPILOT_'; not_logged 'GITHUB_TOKEN'
-  logged " -v $H/.claude-pod:/home/agent-pod/.claude "; logged " -v $H/.claude-pod/.claude.json:/home/agent-pod/.claude.json "
-  [ -s "$H/.claude-pod/.claude.json" ] && [ ! -e "$H/.copilot-pod" ] || fail "state dir of the wrong agent"
+  logged " -v $H/.claude-pod:/home/agent-pod/.claude "; logged " -v $H/config/agent-pod/claude.json:/home/agent-pod/.claude.json "
+  [ -s "$H/config/agent-pod/claude.json" ] && [ ! -e "$H/.copilot-pod" ] || fail "state dir of the wrong agent"
   setup_case; AGENT=copilot launch -- true
   rc_is 0
   logged " -e COPILOT_AUTO_UPDATE=false -e COPILOT_GITHUB_TOKEN -e GH_TOKEN -e GITHUB_TOKEN "; not_logged 'DISABLE_AUTOUPDATER'
-  logged " -v $H/.copilot-pod:/home/agent-pod/.copilot "; logged " -v $H/.copilot-pod/.copilot.json:/home/agent-pod/.copilot.json "
-  [ -s "$H/.copilot-pod/.copilot.json" ] && [ ! -e "$H/.claude-pod" ] || fail "state dir of the wrong agent"
+  logged " -v $H/.copilot-pod:/home/agent-pod/.copilot "; logged " -v $H/config/agent-pod/copilot.json:/home/agent-pod/.copilot.json "
+  [ -s "$H/config/agent-pod/copilot.json" ] && [ ! -e "$H/.claude-pod" ] || fail "state dir of the wrong agent"
   logged " -e HOME=/home/agent-pod "
 }
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
@@ -490,12 +490,20 @@ test_stdin_attached() {   # piped or redirected input reaches the pod: -i always
   setup_case; launch -- true
   rc_is 0; logged '^run --rm -i '
 }
-test_config_symlink() {   # a symlink left in the writable state dir must not be followed on the host
-  setup_case; mkdir -p "$H/.claude-pod"; printf 'secret' > "$CASE/secret"; chmod 644 "$CASE/secret"
-  ln -s "$CASE/secret" "$H/.claude-pod/.claude.json"
+test_config_file_outside_state_dir() {   # the config file is host-owned, in the config dir: the pod cannot swap it for a symlink
+  local f
+  setup_case; f="$H/config/agent-pod/claude.json"; mkdir -p "$H/.claude-pod"; printf 'secret' > "$CASE/secret"; chmod 644 "$CASE/secret"
+  ln -s "$CASE/secret" "$H/.claude-pod/.claude.json"   # what a pod could leave behind in the state dir
   AGENT=claude launch -- true
-  rc_is 1; in_out 'symbolic link'; not_logged '^run '
+  rc_is 0; logged " -v $f:/home/agent-pod/.claude.json "; not_logged "$H/.claude-pod/.claude.json"
   [ "$(ls -l "$CASE/secret" | cut -c1-10)" = "-rw-r--r--" ] || fail "the host file behind the symlink was chmodded"
+  [ "$(cat "$f")" = '{}' ] || fail "a symlink in the state dir was copied as the config"
+  # a regular file from an earlier version is copied once; an existing config is never overwritten
+  setup_case; f="$H/config/agent-pod/claude.json"; mkdir -p "$H/.claude-pod"; printf '{"login":1}' > "$H/.claude-pod/.claude.json"
+  AGENT=claude launch -- true; rc_is 0
+  [ "$(cat "$f")" = '{"login":1}' ] || fail "the config of an earlier version was not carried over"
+  printf '{"new":1}' > "$f"; AGENT=claude launch -- true; rc_is 0
+  [ "$(cat "$f")" = '{"new":1}' ] || fail "an existing config was overwritten"
 }
 
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
@@ -557,7 +565,9 @@ run_mutants() {
   printf' 'if true; then
   printf' || rc=1
   mutate test_stdin_attached 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm")' || rc=1
-  mutate test_config_symlink '[ ! -L "$A_STATE_DIR/$A_CFG_FILE" ] \' 'true \' || rc=1
+  mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
+  mutate test_config_file_outside_state_dir ' && [ ! -L "$A_STATE_DIR/$A_CFG_FILE" ]; then' '; then' || rc=1
+  mutate test_config_file_outside_state_dir 'if [ ! -e "$A_CFG_PATH" ] && ' 'if ' || rc=1
   return $rc
 }
 

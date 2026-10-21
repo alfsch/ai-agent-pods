@@ -109,7 +109,7 @@ Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + 
 - **`agent-pod`**: one `docker run` that mounts your current directory and the agent's state dir, and nothing else of your machine. Run as `claude-pod` / `copilot-pod` it is the same script.
 - **`Dockerfile`**: the tools above; `AGENT_PKG`/`AGENT_VERSION` build args select the agent.
 - **`install.sh`**: checks Docker and builds the images; it does not touch any system path.
-- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images and both state dirs after confirmation.
+- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation.
 
 The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` and `--rm`, and a process cap.
 
@@ -122,11 +122,12 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 - **The network**: outbound is open by default, so contents can be exfiltrated and API quota burned. `NET=none` cuts it, and the agent itself with it; there is no egress allowlist.
 - **The agent's login**, stored in `~/.claude-pod/` or `~/.copilot-pod/` (separate from any host install, shared across projects).
 
-**Where the agent can write**, all intentional bind mounts: the project folder (`$PWD:$PWD`), the agent's state dir (`~/.claude-pod` → `/home/agent-pod/.claude`, `~/.copilot-pod` → `/home/agent-pod/.copilot`) and its config file (`.claude.json`, `.copilot.json`, same dirs). Everywhere else is the container's ephemeral filesystem. Symlinks in the project pointing outside it appear broken. **Hardlinks are different:** a hardlink inside the project to a sensitive file on the same filesystem exposes that inode, so be careful with projects from untrusted sources.
+**Where the agent can write**, all intentional bind mounts: the project folder (`$PWD:$PWD`), the agent's state dir (`~/.claude-pod` → `/home/agent-pod/.claude`, `~/.copilot-pod` → `/home/agent-pod/.copilot`) and its config file (`~/.config/agent-pod/claude.json` or `copilot.json` → `/home/agent-pod/.claude.json` or `.copilot.json`). Everywhere else is the container's ephemeral filesystem. Symlinks in the project pointing outside it appear broken. **Hardlinks are different:** a hardlink inside the project to a sensitive file on the same filesystem exposes that inode, so be careful with projects from untrusted sources.
 
 ### Side effects outside the project folder
 
 - `~/.claude-pod/` and `~/.copilot-pod/`: auth, settings, session history (transcripts can contain code and command output the agent saw).
+- `~/.config/agent-pod/claude.json` and `copilot.json` (under `$XDG_CONFIG_HOME` if set): the agent's account binding and project trust state, one file per agent for all projects. Edit them there. They are outside the state dirs on purpose: the pod can write to a state dir, and a symlink it left in place of the file would make the launcher and Docker follow it to a host file. The pod gets the file, not its directory. Versions before this kept it in the state dir; the first start copies it over.
 - Docker images `agent-pod:claude`, `agent-pod:copilot` and the `node:24-slim` base image; with `DOCKER_CACHE=1` one `agent-pod-docker-*` volume per project; with `DOCKER=1` on a Linux host whose uid is not 1000 an `agent-pod-dind:*` image; Docker build cache. Pruning markers in `~/.local/state/agent-pod/caches/`.
 - Outbound network during build (Docker Hub, apt mirrors, npm) and at runtime (the agent's API, whatever your code reaches).
 
