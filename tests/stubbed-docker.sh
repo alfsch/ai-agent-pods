@@ -657,7 +657,7 @@ test_base_image() {   # install.sh pulls the published base; a failed pull uses 
 }
 
 test_base_signature() {   # a pulled base is verified with cosign when it is there; a failed check means building it here
-  local d H0 DEF=ghcr.io/alfsch/agent-pod-base
+  local d H0 ID DEF=ghcr.io/alfsch/agent-pod-base
   sig() {   # sig <VAR=value>... : install.sh with the default repository (the only one that is checked)
     setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
     printf 'ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n' > "$d/Dockerfile"; printf 'FROM node:9-slim\n' > "$d/Dockerfile.base"
@@ -667,7 +667,11 @@ test_base_signature() {   # a pulled base is verified with cosign when it is the
   }
   # verified: the signer is the publish workflow on main, and the base is used as pulled
   sig; rc_is 0; in_out 'signature verified'; not_logged '-f .*Dockerfile.base'
-  logged "^cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp .*publish-base.*refs/heads/main.* $DEF:$H0\$"
+  # the whole command, character for character: the issuer, and an identity anchored to this repository, this workflow and
+  # main (a looser pattern would accept a signature from another repository, workflow or branch)
+  ID='^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
+  grep -qxF -- "cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp $ID $DEF:$H0" "$STUB_LOG" \
+    || fail "cosign was not called with the exact issuer and signer identity"
   # by digest when Docker knows it
   sig STUB_REPO_DIGEST="$DEF@sha256:abc"; rc_is 0; logged " $DEF@sha256:abc\$"; not_logged "cosign .* $DEF:$H0"
   # and the agent image is built from that digest, not from the tag that could be retargeted after the check
@@ -781,6 +785,11 @@ run_mutants() {
   mutate test_base_signature '    if ! verify_base; then' '    if false; then' install.sh || rc=1
   mutate test_base_signature '--certificate-identity-regexp "$SIGNER_IDENTITY"' '--certificate-identity-regexp ".*"' install.sh || rc=1
   mutate test_base_signature '--certificate-oidc-issuer "$SIGNER_ISSUER"' '--certificate-oidc-issuer ""' install.sh || rc=1
+  mutate test_base_signature 'github.com/alfsch/ai-agent-pods/' 'github.com/[^/]*/[^/]*/' install.sh || rc=1
+  mutate test_base_signature '\.github/workflows/publish-base\.yaml@' '\.github/workflows/[^@]*@' install.sh || rc=1
+  mutate test_base_signature '@refs/heads/main$'"'"'' '@refs/heads/.*$'"'"'' install.sh || rc=1
+  mutate test_base_signature "SIGNER_IDENTITY='^https" "SIGNER_IDENTITY='https" install.sh || rc=1
+  mutate test_base_signature 'publish-base\.yaml@refs/heads/main$'"'"'' 'publish-base\.yaml@refs/heads/main'"'"'' install.sh || rc=1
   mutate test_base_signature '"${ref:-$BASE_IMAGE}"' '"$BASE_IMAGE"' install.sh || rc=1
   mutate test_base_signature '    [ -z "$ref" ] || BASE_IMAGE="$ref"' '    :' install.sh || rc=1
   mutate test_base_signature "index(\$0, repo) == 1 { print; exit }" "{ print; exit }" install.sh || rc=1
