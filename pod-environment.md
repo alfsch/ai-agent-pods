@@ -11,9 +11,10 @@ Copilot CLI alike; it is about the container, not about the project.
   (`python3 -m venv .venv`), a project-local `npm install`, or a binary in the project folder.
 - The network is open (registries, APIs) unless the session was started with `NET=none`. A dev server must listen on
   `0.0.0.0` to be reachable from the host, and only ports published with `PORTS` are (on the host's 127.0.0.1).
-- `docker` is a client only. It works only if the session was started with `DOCKER=1`; then it talks to a throwaway
-  rootless daemon in a sidecar. Ports published by inner containers are at `dind:<port>`, not `localhost`. Without
-  `DOCKER=1` every `docker` command fails.
+- `docker` is a client only; there is no daemon in the container. Client-only commands work (`docker --version`,
+  `docker compose config`). Anything that needs a daemon (`build`, `run`, `ps`, `compose up`) works only if the session
+  was started with `DOCKER=1`; then it talks to a throwaway rootless daemon in a sidecar, and ports published by inner
+  containers are at `dind:<port>`, not `localhost`. Without `DOCKER=1` those commands fail.
 - `gh` is authenticated only if the host had `GH_TOKEN` or `GITHUB_TOKEN` set: Copilot CLI sessions pass them on,
   Claude Code sessions do not (`COPILOT_GITHUB_TOKEN` is for Copilot itself, not for `gh`). `gh auth login` works
   with the open network, but its login is lost when the session ends. There is no SSH key or git credential for pushes.
