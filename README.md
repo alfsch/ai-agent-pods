@@ -2,7 +2,7 @@
 
 > Docker sandbox for AI coding agents: [Claude Code](https://www.anthropic.com/claude-code) and the [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli), one launcher for both. Runs the agent against one project folder, so your home directory, SSH keys and other projects stay invisible to the container. Unofficial.
 
-![claude-pod and copilot-pod](assets/cover.webp)
+![claude-pod and copilot-pod](assets/cover.jpeg)
 
 ## TL;DR
 

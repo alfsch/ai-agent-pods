@@ -1,7 +1,7 @@
 # Cover image
 
-The cover image `assets/cover.webp` was made with Bing Image Creator from an earlier version of the prompt below
-(plain round eyes); the prompt now asks for friendlier eyes and has not produced a picture yet. The picture of copilot-pod was made the same way.
+The cover image `assets/cover.jpeg` was made with Bing Image Creator from the prompt below (converted from WebP to
+JPEG). The picture of copilot-pod was made the same way.
 
 Reference look (copilot-pod): a black matte cylindrical base with a small light label, a clear glass dome, a glass
 sphere inside with softly glowing eyes, dark charcoal background, a soft reflective floor, studio product shot.
@@ -25,13 +25,13 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
   in the prompt to keep that.
 - Generators often garble text. If the labels come out wrong, generate the picture without the label text and add
   the two labels afterwards.
-- Friendlier eyes: the first picture had plain round glowing dots, which look blank. The eye description above adds
-  highlights, upturned corners and a small smile. If the eyes turn into cartoon faces over the brain, add "eyes
+- Friendlier eyes: a first picture with plain round glowing dots looked blank. The eye description above adds
+  highlights, upturned corners and a small smile, which gave the current picture. If the eyes turn into cartoon faces over the brain, add "eyes
   embedded in the brain, no face outline"; if the brain disappears, add "the brain stays clearly visible".
 - To make the spheres differ in shape as well, add: "left sphere with a rounder, friendlier face, right sphere with a
   more angular, technical look".
 
 ## Replacing the image
 
-Save the new picture as `assets/cover.webp` (3:2, about 1250 px wide is enough; keep the name, or change the link in
+Save the new picture as `assets/cover.jpeg` (3:2, about 1250 px wide is enough; keep the name, or change the link in
 the README). The README's license section says that the image was generated with AI; keep that line.
