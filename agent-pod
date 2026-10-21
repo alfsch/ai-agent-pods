@@ -256,7 +256,7 @@ DOCKER_FLAGS+=("--pids-limit=${PIDS:-4096}")
 #   - Ports published by inner containers live on the sidecar's network, not on the host.
 #   The sidecar image is pinned by digest (kept current by Renovate). Override it with DIND_IMAGE=...
 [ -n "${DIND_IMAGE:-}" ] && _dind_image_set=1 || _dind_image_set=
-DIND_IMAGE="${DIND_IMAGE:-docker:29-dind-rootless@sha256:825e451c9bd898245ca8fb07bd9a48999ccf33c0192fd68594c73aed7b67d11f}"
+DIND_IMAGE="${DIND_IMAGE:-docker:29-dind-rootless@sha256:ffd91b124cb1868fe3baab16bc78963e19887af56567f5593661e4397308bc19}"
 # Automatic cleanup of old DOCKER_CACHE volumes. Docker doesn't record when a volume was last used, so
 # each cache gets an empty "stamp" file in STATE_DIR whose mtime is its last use: touched at session
 # start and end, and every start removes the volumes whose stamp is older than DOCKER_CACHE_MAX_AGE_DAYS
