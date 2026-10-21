@@ -77,14 +77,14 @@ trap cleanup EXIT
 # run_launcher [VAR=value ...] -- args: the launcher in the project folder, with a private HOME and state dir.
 run_launcher() {
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  (cd "$PROJ" && exec env HOME="$WORK/home" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" XDG_STATE_HOME="$WORK/state" \
+  (cd "$PROJ" && exec env HOME="$WORK/home" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" XDG_STATE_HOME="$WORK/state" XDG_CONFIG_HOME="$WORK/config" \
      AGENT_POD_NO_UPDATE=1 ${envs[@]+"${envs[@]}"} "$LAUNCHER" "$AGENT" "$@")
 }
 # start_launcher [VAR=value ...] -- args: like run_launcher, in the background. LP is the launcher's own pid (the
 # subshell execs it), so a signal sent to LP reaches the launcher and not a wrapper around it.
 start_launcher() {
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
-  (cd "$PROJ" && exec env HOME="$WORK/home" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" XDG_STATE_HOME="$WORK/state" \
+  (cd "$PROJ" && exec env HOME="$WORK/home" DOCKER_CONFIG="$DOCKER_CONFIG_DIR" XDG_STATE_HOME="$WORK/state" XDG_CONFIG_HOME="$WORK/config" \
      AGENT_POD_NO_UPDATE=1 ${envs[@]+"${envs[@]}"} "$LAUNCHER" "$AGENT" "$@") &
   LP=$!; BG_PIDS+=("$LP")
 }

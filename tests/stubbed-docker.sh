@@ -622,8 +622,11 @@ run_mutants() {
   printf' || rc=1
   mutate test_stdin_attached 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm")' || rc=1
   mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
-  mutate test_config_file_outside_state_dir ' && [ ! -L "$A_STATE_DIR/$A_CFG_FILE" ]; then' '; then' || rc=1
-  mutate test_config_file_outside_state_dir 'if [ ! -e "$A_CFG_PATH" ] && ' 'if ' || rc=1
+  mutate test_config_file_outside_state_dir 'if [ ! -e "$A_CFG_PATH" ]; then
+  cp -P' 'if true; then
+  cp -P' || rc=1
+  mutate test_config_file_outside_state_dir 'cp -P "$A_STATE_DIR' 'cp "$A_STATE_DIR' || rc=1
+  mutate test_config_file_outside_state_dir '[ ! -L "$A_CFG_PATH" ] || rm -f "$A_CFG_PATH"' 'true' || rc=1
   mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
