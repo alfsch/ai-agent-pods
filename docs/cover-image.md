@@ -1,7 +1,8 @@
 # Cover image
 
-The cover image `assets/cover.jpeg` was made with Bing Image Creator from the prompt below (converted from WebP to
-JPEG). The picture of copilot-pod was made the same way.
+The cover image `assets/cover.jpeg` was made with Bing Image Creator from the prompt below. `assets/cover-original.webp`
+is the file as Bing delivered it; the JPEG is converted from it, which is what the README shows. The picture of
+copilot-pod was made the same way.
 
 Reference look (copilot-pod): a black matte cylindrical base with a small light label, a clear glass dome, a glass
 sphere inside with softly glowing eyes, dark charcoal background, a soft reflective floor, studio product shot.
@@ -33,5 +34,5 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
 
 ## Replacing the image
 
-Save the new picture as `assets/cover.jpeg` (3:2, about 1250 px wide is enough; keep the name, or change the link in
-the README). The README's license section says that the image was generated with AI; keep that line.
+Save the new picture as `assets/cover-original.webp` and convert it to `assets/cover.jpeg` (3:2, about 1250 px wide is
+enough; keep the names, or change the link in the README). The README's license section says that the image was generated with AI; keep that line.
