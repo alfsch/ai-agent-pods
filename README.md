@@ -62,7 +62,11 @@ claude-pod claude --dangerously-skip-permissions     # note: the command is stil
 | State on the host | `~/.claude-pod/` | `~/.copilot-pod/` |
 | Token variables forwarded | none | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` |
 
-**Automatic updates on start:** an image built from the default channel is compared with npm's current version on every start (3-second timeout) and rebuilt via `install.sh` when it is behind. Offline or failed: a note, and the existing image is used. Pinned images are never updated. Skip the check with `AGENT_POD_NO_UPDATE=1` (the old `CLAUDE_POD_NO_UPDATE` and `COPILOT_POD_NO_UPDATE` still work, each for its own agent).
+**Automatic updates on start:** two checks, both best-effort (offline or failed: a note, and the existing image is used).
+- *The repository changed.* The image carries a hash of the Dockerfile and the files it copies. When it differs from the repo's (after a `git pull`, a Renovate update, your own edit of the Dockerfile), the image is rebuilt before the pod starts, with the version or channel it was built with. A start with a rebuild takes a minute or two.
+- *A newer agent release.* An image built from the default channel is compared with npm's current version (3-second timeout) and rebuilt via `install.sh` when it is behind. Pinned images are never updated this way.
+
+ Skip the check with `AGENT_POD_NO_UPDATE=1` (the old `CLAUDE_POD_NO_UPDATE` and `COPILOT_POD_NO_UPDATE` still work, each for its own agent).
 
 ### First launch (login)
 

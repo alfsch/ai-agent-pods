@@ -99,18 +99,32 @@ if [ -z "$(docker image ls -q "$IMAGE" 2>/dev/null)" ]; then
   "$HERE/install.sh" "$AGENT" >&2 || die "Could not build the image for $A_NAME. Run '$HERE/install.sh $AGENT' to see why."
 fi
 
-# Auto-update on every start: if the image was built from the agent's default channel (label set by install.sh)
-# and npm's current version on that channel differs from what's installed, rebuild via install.sh before launching.
-# Images pinned to a version are left alone, as are images built before the labels existed. The check is
-# best-effort: a slow/offline registry (3s cap) or a failed rebuild only prints a note and continues with the
-# existing image. Set AGENT_POD_NO_UPDATE=1 to skip it (the old CLAUDE_POD_NO_UPDATE and COPILOT_POD_NO_UPDATE still work, each for its own agent).
-# Output goes to stderr so piped stdout stays clean.
-if [ -z "${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}" ] && command -v curl >/dev/null; then
+# Updates on every start, both best-effort: a failed rebuild only prints a note and continues with the existing image.
+# Set AGENT_POD_NO_UPDATE=1 to skip them (the old CLAUDE_POD_NO_UPDATE and COPILOT_POD_NO_UPDATE still work, each for
+# its own agent). Output goes to stderr so piped stdout stays clean.
+#   1. The repo changed: install.sh stores a hash of the Dockerfile and what it copies in the image (label
+#      agent-pod.build). When it differs from the repo's, or the image has none (built before the label), the image is
+#      rebuilt, keeping what was asked for at install time (the channel label: the default channel, "latest", or a
+#      pinned version). This also needs no network.
+#   2. A newer agent release: if the image was built from the agent's default channel (label set by install.sh)
+#      and npm's current version on that channel differs from what's installed, rebuild via install.sh. Images
+#      pinned to a version are left alone, as are images built before the labels existed. A slow/offline registry
+#      (3s cap) just skips the check. Not done after 1., which has just installed the newest version.
+if [ -z "${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}" ]; then
   # Inspect by image ID (found via `image ls -q`, like the preflight above), not by name — see the
   # Docker Desktop note there. A failed lookup leaves the labels empty, which just skips the update.
   _image_id="$(docker image ls -q "$IMAGE" 2>/dev/null | head -n1 || true)"
   _label() { [ -n "$_image_id" ] && docker image inspect --format "{{index .Config.Labels \"$1\"}}" "$_image_id" 2>/dev/null || true; }
-  if [ "$(_label agent-pod.channel)" = "$A_CHANNEL" ]; then
+  _rebuilt=
+  _want="$("$HERE/install.sh" --build-hash 2>/dev/null || true)"
+  if [ -n "$_want" ] && [ -n "$_image_id" ] && [ "$(_label agent-pod.build)" != "$_want" ]; then
+    _asked="$(_label agent-pod.channel)"
+    printf '%s●%s The repository changed since the %s image was built — rebuilding it...\n' "$BOLD" "$RESET" "$A_NAME" >&2
+    env "$A_VERSION_VAR=${_asked:-$A_CHANNEL}" "$HERE/install.sh" "$AGENT" >&2 \
+      && _rebuilt=1 || err "Rebuild failed; continuing with the existing image."
+    _image_id="$(docker image ls -q "$IMAGE" 2>/dev/null | head -n1 || true)"
+  fi
+  if [ -z "$_rebuilt" ] && command -v curl >/dev/null && [ "$(_label agent-pod.channel)" = "$A_CHANNEL" ]; then
     _installed="$(_label agent-pod.version)"
     # If install.sh couldn't resolve the channel at build time, the label holds the literal tag; ask the
     # image for the real version so an up-to-date image isn't needlessly rebuilt. The output may carry text around

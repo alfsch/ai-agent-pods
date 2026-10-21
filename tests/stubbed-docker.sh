@@ -34,7 +34,7 @@ AGENT="${AGENT-claude}"
 #                         the client keeps writing for N seconds; like Docker's client it survives two signals
 #                         and exits 1 on the third (client-killed)
 #   STUB_STOP_ERROR_AT=N  the Nth `docker stop` of the pod fails with an error other than "No such container"
-#   STUB_CHANNEL / STUB_VERSION   the agent-pod.channel / agent-pod.version labels of the image;
+#   STUB_CHANNEL / STUB_VERSION / STUB_BUILD   the agent-pod.channel / .version / .build labels of the image;
 #                         STUB_VERSION_OUT is what `<agent> --version` prints in it
 #   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
@@ -47,7 +47,7 @@ case "$1" in
   image)
     # image labels, for the update check
     if [ "$2" = inspect ]; then
-      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; esac
+      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; *agent-pod.build*) echo "${STUB_BUILD:-}" ;; esac
       exit 0
     fi
     if [[ "$*" == *agent-pod-dind* ]]; then
@@ -559,6 +559,36 @@ test_stdin_reaches_pod() {   # piped input arrives in the pod, also from the bac
   done
 }
 
+test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash label) is rebuilt on the next start, keeping its pin
+  local d
+  rb() {   # rb <agent> <VAR=value>... : runs the launcher with a stub install.sh that answers --build-hash with "new"
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
+    printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = --build-hash ]; then echo new; exit 0; fi' \
+      'echo "install.sh $*" >> "$STUB_LOG"; echo "pin ${CLAUDE_CODE_VERSION:-}${COPILOT_CLI_VERSION:-}" >> "$STUB_LOG"; exit "${STUB_INSTALL_EXIT:-0}"' > "$d/install.sh"
+    chmod +x "$d/install.sh"
+    local a="$1"; shift
+    AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= "$@" -- true
+  }
+  # a different hash: rebuilt once, before the pod starts, with the channel the image was built from
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "the image was not rebuilt exactly once"
+  order '^install.sh claude$' '^run --rm .*agent-pod:claude true$'; logged '^pin stable$'; in_out 'repository changed'
+  # an image without the label (built before it existed) is rebuilt too
+  rb copilot STUB_BUILD= STUB_CHANNEL=latest; rc_is 0; logged '^install.sh copilot$'
+  # a pinned image keeps its version
+  rb copilot STUB_BUILD=old STUB_CHANNEL=1.2.3; rc_is 0; logged '^pin 1.2.3$'
+  # the same hash: nothing is rebuilt
+  rb claude STUB_BUILD=new STUB_CHANNEL=stable STUB_VERSION=9.9.9; rc_is 0; not_logged '^install.sh'
+  # opt-out
+  rb claude STUB_BUILD=old AGENT_POD_NO_UPDATE=1; rc_is 0; not_logged '^install.sh'
+  # a failed rebuild does not stop the start
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=9.9.9 STUB_INSTALL_EXIT=1; rc_is 0
+  in_out 'Rebuild failed'; logged '^run --rm .*agent-pod:claude true$'
+  # after a rebuild the release check does not run (it would rebuild a second time)
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=1.0.0; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "rebuilt twice: once for the repository, once for a release"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the launcher)
   local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
@@ -625,6 +655,10 @@ run_mutants() {
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
   mutate test_stdin_reaches_pod '"${RUN_CMD[@]}" <&0 &' '"${RUN_CMD[@]}" &' || rc=1
+  mutate test_rebuild_on_repo_change '"$(_label agent-pod.build)" != "$_want"' '"$(_label agent-pod.build)" = "$_want"' || rc=1
+  mutate test_rebuild_on_repo_change '"$A_VERSION_VAR=${_asked:-$A_CHANNEL}"' '"$A_VERSION_VAR=$A_CHANNEL"' || rc=1
+  mutate test_rebuild_on_repo_change 'if [ -z "$_rebuilt" ] && command -v curl' 'if command -v curl' || rc=1
+  mutate test_rebuild_on_repo_change '&& _rebuilt=1 || err' '&& true || err' || rc=1
   return $rc
 }
 

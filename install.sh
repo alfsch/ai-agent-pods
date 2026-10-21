@@ -15,6 +15,16 @@ trap 'err "install.sh failed at line $LINENO"' ERR
 # Pin a version with CLAUDE_CODE_VERSION=x.y.z or COPILOT_CLI_VERSION=x.y.z (for the agent named on the command
 # line). The launcher calls this by itself when the image of an agent is missing or outdated.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A hash of everything the image is built from besides the agent: the Dockerfile and the files it COPYs (list them
+# here when the Dockerfile copies another). It is stored in the image (label agent-pod.build) and compared by the
+# launcher, which rebuilds when it differs, so a change to the repo reaches the image on the next start.
+# `install.sh --build-hash` prints it.
+build_hash() {
+  cat "$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
+}
+if [ "${1:-}" = "--build-hash" ]; then build_hash; exit 0; fi
+
 WHICH="${1:-all}"
 case "$WHICH" in
   claude|copilot) AGENTS=("$WHICH") ;;
@@ -58,7 +68,8 @@ install_agent() {
   # changes. For an unresolved dist-tag the literal never changes while the version it points to does, so
   # we pass CACHEBUST=$(date +%s) to force a refetch.
   local build_args=(--build-arg "AGENT=$agent" --build-arg "AGENT_PKG=$pkg"
-                    --build-arg "AGENT_VERSION=$version" --build-arg "AGENT_CHANNEL=$channel_label")
+                    --build-arg "AGENT_VERSION=$version" --build-arg "AGENT_CHANNEL=$channel_label"
+                    --build-arg "BUILD_HASH=$(build_hash)")
   if [[ ! "$version" =~ ^[0-9] ]]; then
     build_args+=(--build-arg "CACHEBUST=$(date +%s)")
   fi
