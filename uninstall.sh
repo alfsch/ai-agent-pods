@@ -15,9 +15,10 @@ trap 'err "uninstall.sh failed at line $LINENO"' ERR
 # The config files (login binding, trust state) are in the config dir.
 STATE_DIRS=("$HOME/.claude-pod" "$HOME/.copilot-pod" "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod")
 IMAGES=(agent-pod:claude agent-pod:copilot)
+BASE_REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"   # the shared base image install.sh pulls or builds
 
 info "Will remove"
-printf '  %simages:%s %s\n' "$DIM" "$RESET" "${IMAGES[*]}"
+printf '  %simages:%s %s %s(and every tag of %s)%s\n' "$DIM" "$RESET" "${IMAGES[*]}" "$DIM" "$BASE_REPO" "$RESET"
 printf '  %sdirs:  %s %s %s(auth + session history)%s\n' "$DIM" "$RESET" "${STATE_DIRS[*]}" "$DIM" "$RESET"
 printf '  %svolumes:%s agent-pod-docker-* %s(DOCKER_CACHE image caches, if any)%s\n' "$DIM" "$RESET" "$DIM" "$RESET"
 printf '  %ssidecars:%s agent-pod-dind:* %s(DOCKER=1 sidecar images for a host uid other than 1000, if any)%s\n' "$DIM" "$RESET" "$DIM" "$RESET"
@@ -50,6 +51,20 @@ for IMAGE in "${IMAGES[@]}"; do
     ok "Image '$IMAGE' was not present"
   fi
 done
+echo
+
+# The shared base image: every tag of it (one per version of Dockerfile.base that was pulled or built here).
+_bases="$(docker image ls "$BASE_REPO" --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -v ':<none>$' || true)"
+if [ -n "$_bases" ]; then
+  # shellcheck disable=SC2086
+  if docker rmi -f $_bases >/dev/null 2>&1; then
+    ok "Removed base images"
+  else
+    err "Could not remove the base images ($BASE_REPO:*)."
+  fi
+else
+  ok "No base image present"
+fi
 echo
 
 # Derived sidecar images the launcher builds for a host uid other than 1000.

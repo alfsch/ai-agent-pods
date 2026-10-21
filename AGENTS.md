@@ -4,7 +4,8 @@ Read by Claude Code (through `CLAUDE.md`), Copilot CLI and other agents. The sam
 
 Runs Claude Code or the GitHub Copilot CLI in a hardened Docker container scoped to the current folder. One
 launcher, `agent-pod` (symlinks `claude-pod` and `copilot-pod` select the agent by name); `install.sh` builds
-`agent-pod:claude` and `agent-pod:copilot` from one `Dockerfile`, `uninstall.sh` removes everything. User docs
+`agent-pod:claude` and `agent-pod:copilot` from `Dockerfile` (the agent) on top of `Dockerfile.base` (the shared tools; published by CI to GHCR),
+`uninstall.sh` removes everything. User docs
 are in `README.md`.
 
 ## One launcher, two agents
@@ -63,8 +64,14 @@ test that fails without it.
   project leave hooks or MCP entries for the next session in another; it is documented in the README, with the way to
   separate untrusted work (another `HOME`). Do not "fix" it by silently changing what is shared.
 - `node:24-slim` in `uninstall.sh` and the README is kept in sync with the Dockerfile by Renovate's regex manager.
-- `install.sh` pulls the Dockerfile's first `FROM` image before every build and, if the pull fails, builds on the local
-  copy (a registry rate limit must not fail a start). It is not `docker build --pull`, which fails hard.
+- `install.sh` pulls the published base (`ghcr.io/alfsch/agent-pod-base:<hash of Dockerfile.base and
+  pod-environment.md>`); a failed pull uses the local copy of that tag, then builds `Dockerfile.base` here (a registry
+  rate limit or outage must not fail a start). Only the base is ever published: Claude Code and Copilot CLI are
+  proprietary (all rights reserved / redistribution only under conditions), so never add an agent to a published
+  image. Likewise the first `FROM` of `Dockerfile.base` is pulled with a local fallback before a local base build; it is
+  not `docker build --pull`, which fails hard. A change to `Dockerfile.base` or `pod-environment.md` reaches users only
+  after `publish-base.yaml` has run on `main`; until then the pull fails and they build it. Pull requests build it
+  locally, they cannot publish.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.

@@ -4,7 +4,7 @@
   "forkProcessing": "enabled",
   "customManagers": [
     {
-      "description": "Keep the node base image literal in uninstall.sh and the README in sync with the Dockerfile",
+      "description": "Keep the node base image literal in uninstall.sh and the README in sync with Dockerfile.base",
       "customType": "regex",
       "managerFilePatterns": ["/^uninstall\\.sh$/", "/^README\\.md$/"],
       "matchStrings": ["node:(?<currentValue>\\d[\\w.]*-slim)"],
@@ -29,7 +29,7 @@
       "groupName": "node base image"
     },
     {
-      "description": "Pin yq's image digest (the Dockerfile COPYs the binary out of it); Renovate updates tag and digest together",
+      "description": "Pin yq's image digest (Dockerfile.base COPYs the binary out of it); Renovate updates tag and digest together",
       "matchDepNames": ["mikefarah/yq"],
       "matchDatasources": ["docker"],
       "pinDigests": true

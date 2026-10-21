@@ -34,8 +34,9 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sysctl kernel.unprivileged_userns_clone user.max_user_namespaces || true
 
-      # Builds the image from the Dockerfile of this commit, so an update of the node, docker CLI or yq image is
-      # what gets tested.
+      # Builds the image from the Dockerfiles of this commit, so an update of the node, docker CLI or yq image is
+      # what gets tested: the base image's tag is a hash of Dockerfile.base, so a change to it is not published yet
+      # (publish-base.yaml runs on main) and install.sh builds the base here; an unchanged one is pulled.
       - name: Build the image
         run: ./install.sh
 
