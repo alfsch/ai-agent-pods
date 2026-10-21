@@ -208,7 +208,9 @@ launch_bg() { # same, background; sets LPID
 finish_bg() { RC=0; wait "$LPID" || RC=$?; kill "$WD" 2>/dev/null; wait "$WD" 2>/dev/null; return 0; }
 logged()    { grep -qE -- "$1" "$STUB_LOG" || fail "expected docker call matching: $1"; }
 not_logged(){ ! grep -qE -- "$1" "$STUB_LOG" || fail "unexpected docker call matching: $1"; }
-in_out()    { cat "$CASE/out" "$CASE/err" | grep -qE -- "$1" || fail "expected output matching: $1"; }
+# No pipe from cat: with pipefail, a grep -q that stops at an early match leaves cat writing into a closed pipe, which on
+# macOS ends as "cat: stdout: Broken pipe" and a failed pipeline although the text was found (a flaky test_base_image).
+in_out()    { grep -qE -- "$1" "$CASE/out" "$CASE/err" || fail "expected output matching: $1"; }
 rc_is()     { [ "$RC" = "$1" ] || fail "exit code $RC, expected $1"; }
 order() {    # order <regex>... : first match of each appears in this order
   local last=0 n re; for re in "$@"; do
