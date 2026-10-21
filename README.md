@@ -52,7 +52,9 @@ claude-pod claude --dangerously-skip-permissions     # note: the command is stil
 
 ### Images: install, update, pin
 
-`install.sh [claude|copilot|all]` builds `agent-pod:<agent>` from one `Dockerfile`; the layers before the agent are shared, so the second image costs only the agent's npm package. A missing image is built by the launcher itself on the first start, so installing is optional.
+`install.sh [claude|copilot|all]` builds `agent-pod:<agent>` from `Dockerfile` on top of one shared **base image** (`Dockerfile.base`: the tools, no agent), so the second image costs only the agent's npm package. A missing image is built by the launcher itself on the first start, so installing is optional.
+
+**The base image** is published by CI to `ghcr.io/alfsch/agent-pod-base`, tagged with a hash of `Dockerfile.base` and `pod-environment.md`, for amd64 and arm64. `install.sh` pulls it, which saves the minute or two the tools take to build. If the pull fails (offline, a registry rate limit) it uses a local copy of that tag, and without one it builds the base itself from `Dockerfile.base`. `AGENT_POD_BUILD_BASE=1 ./install.sh` always builds it locally, which is the way to run only what you have read; `AGENT_POD_BASE_REPO=registry/path` points at another registry path (a fork). Only the base is published: Claude Code and Copilot CLI are proprietary, so each agent is always installed by your own build.
 
 | | Claude Code | Copilot CLI |
 |---|---|---|
@@ -63,7 +65,7 @@ claude-pod claude --dangerously-skip-permissions     # note: the command is stil
 | Token variables forwarded | none | `COPILOT_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN` |
 
 **Automatic updates on start:** two checks, both best-effort (offline or failed: a note, and the existing image is used).
-- *The repository changed.* The image carries a hash of the Dockerfile and the files it copies. When it differs from the repo's (after a `git pull`, a Renovate update, your own edit of the Dockerfile), the image is rebuilt before the pod starts, with the version or channel it was built with. A start with a rebuild takes a minute or two.
+- *The repository changed.* The image carries a hash of the Dockerfile and the files it copies. When it differs from the repo's (after a `git pull`, a Renovate update, your own edit of the Dockerfile), the image is rebuilt before the pod starts, with the version or channel it was built with. A start with a rebuild takes a minute or two. A base image that CI has rebuilt (weekly, for Debian security fixes) is picked up the next time an image is built; when the base is built locally, `install.sh` first pulls the `node:24-slim` image it starts from and, if that fails, builds on the local copy.
 - *A newer agent release.* An image built from the default channel is compared with npm's current version (3-second timeout) and rebuilt via `install.sh` when it is behind. Pinned images are never updated this way.
 
  Skip the check with `AGENT_POD_NO_UPDATE=1` (the old `CLAUDE_POD_NO_UPDATE` and `COPILOT_POD_NO_UPDATE` still work, each for its own agent).
@@ -117,14 +119,14 @@ The agent only sees files inside the project folder. Copy the screenshot into th
 
 ### Customizing the image
 
-Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + `yq` + the `docker` CLI (+ compose, buildx) + `python3` + `pip` + `venv` + `pdftotext` + `qpdf` + `tesseract` (English, German) + the agent. Anything else your projects need you add yourself: edit the `Dockerfile` and re-run `install.sh`. Claude Code and Copilot CLI are told what is in the image, and what is not possible in the container (no root, Docker only with `DOCKER=1`), by [`pod-environment.md`](pod-environment.md), which the image carries where each tool reads it. Keep its "Tools on PATH" line in line with the Dockerfile; the integration tests check every tool on it.
+Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + `yq` + the `docker` CLI (+ compose, buildx) + `python3` + `pip` + `venv` + `pdftotext` + `qpdf` + `tesseract` (English, German) + the agent. Anything else your projects need you add yourself: edit `Dockerfile.base` (the tools; build it locally with `AGENT_POD_BUILD_BASE=1 ./install.sh`, as the published base does not have your change) and re-run `install.sh`. Claude Code and Copilot CLI are told what is in the image, and what is not possible in the container (no root, Docker only with `DOCKER=1`), by [`pod-environment.md`](pod-environment.md), which the image carries where each tool reads it. Keep its "Tools on PATH" line in line with the Dockerfile; the integration tests check every tool on it.
 
 ## Security and limits
 
 ### What it actually does
 
 - **`agent-pod`**: one `docker run` that mounts your current directory and the agent's state dir, and nothing else of your machine. Run as `claude-pod` / `copilot-pod` it is the same script.
-- **`Dockerfile`**: the tools above; `AGENT_PKG`/`AGENT_VERSION` build args select the agent.
+- **`Dockerfile.base`**: the tools above, published as the base image by `.github/workflows/publish-base.yaml`. **`Dockerfile`**: the agent on top of it; `AGENT_PKG`/`AGENT_VERSION` build args select the agent.
 - **`install.sh`**: checks Docker and builds the images; it does not touch any system path.
 - **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation.
 
@@ -146,8 +148,8 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 
 - `~/.claude-pod/` and `~/.copilot-pod/`: auth, settings, session history (transcripts can contain code and command output the agent saw).
 - `~/.config/agent-pod/claude.json` and `copilot.json` (under `$XDG_CONFIG_HOME` if set): the agent's account binding and project trust state, one file per agent for all projects. Edit them there. They are outside the state dirs on purpose: the pod can write to a state dir, and a symlink it left in place of the file would make the launcher and Docker follow it to a host file. The pod gets the file, not its directory. If you used the single-agent claude-pod or copilot-pod before, copy its `.claude.json` or `.copilot.json` from the state dir to that path to keep the trust state (login credentials stay in the state dir).
-- Docker images `agent-pod:claude`, `agent-pod:copilot` and the `node:24-slim` base image; with `DOCKER_CACHE=1` one `agent-pod-docker-*` volume per project; with `DOCKER=1` on a Linux host whose uid is not 1000 an `agent-pod-dind:*` image; Docker build cache. Pruning markers in `~/.local/state/agent-pod/caches/`.
-- Outbound network during build (Docker Hub, apt mirrors, npm) and at runtime (the agent's API, whatever your code reaches).
+- Docker images `agent-pod:claude`, `agent-pod:copilot`, the base image `ghcr.io/alfsch/agent-pod-base:*` and the `node:24-slim` image it is built from; with `DOCKER_CACHE=1` one `agent-pod-docker-*` volume per project; with `DOCKER=1` on a Linux host whose uid is not 1000 an `agent-pod-dind:*` image; Docker build cache. Pruning markers in `~/.local/state/agent-pod/caches/`.
+- Outbound network during build (ghcr.io for the base image, Docker Hub, apt mirrors, npm) and at runtime (the agent's API, whatever your code reaches).
 
 No `sudo`, no writes to `/usr/local`, `/etc`, shell rc files, or your existing `~/.claude/` / `~/.copilot/`.
 
@@ -168,7 +170,7 @@ Portable bash + Docker: macOS (Docker Desktop, OrbStack, Colima), Linux, Windows
 ~/tools/ai-agent-pods/uninstall.sh
 ```
 
-Lists what it removes and what it leaves (the `node:24-slim` image, build cache, this repo, your shell aliases) and asks first.
+Lists what it removes (the images, the base image tags too) and what it leaves (the `node:24-slim` image, build cache, this repo, your shell aliases) and asks first.
 
 ### License and trademarks
 

@@ -16,14 +16,17 @@ trap 'err "install.sh failed at line $LINENO"' ERR
 # line). The launcher calls this by itself when the image of an agent is missing or outdated.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# A hash of everything the image is built from besides the agent: the Dockerfile and the files it COPYs (list them
-# here when the Dockerfile copies another). It is stored in the image (label agent-pod.build) and compared by the
-# launcher, which rebuilds when it differs, so a change to the repo reaches the image on the next start.
-# `install.sh --build-hash` prints it.
-build_hash() {
-  cat "$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16
-}
+# Two hashes, both stored or compared by tag/label so a change to the repo reaches the images:
+#   base_hash  what the shared base image (Dockerfile.base) is built from: that file and the files it COPYs (list them
+#              here when it copies another). It is the base image's tag in the registry. `install.sh --base-hash`
+#   build_hash everything an agent image is built from besides the agent: the above and the agent Dockerfile. It is
+#              stored in the image (label agent-pod.build) and compared by the launcher, which rebuilds when it
+#              differs, so a change to the repo reaches the image on the next start. `install.sh --build-hash`
+hash16() { { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16; }
+base_hash() { cat "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }
+build_hash() { cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }
 if [ "${1:-}" = "--build-hash" ]; then build_hash; exit 0; fi
+if [ "${1:-}" = "--base-hash" ]; then base_hash; exit 0; fi
 
 WHICH="${1:-all}"
 case "$WHICH" in
@@ -34,6 +37,56 @@ esac
 
 command -v docker >/dev/null || die "Docker is required but not on PATH."
 docker info >/dev/null 2>&1 || die "Docker daemon is not running."
+
+# The shared base image (Dockerfile.base): published to a registry by CI under a tag that is the hash of what it is
+# built from (see base_hash). Each install pulls it, so a rebuild of it by CI reaches the user; if the pull fails (offline,
+# a registry rate limit) a local copy of that tag is used, and without one the base is built here. AGENT_POD_BASE_REPO
+# names another registry path (a fork), AGENT_POD_BUILD_BASE=1 always builds locally. No agent is ever published.
+BASE_REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"
+BASE_IMAGE="$BASE_REPO:$(base_hash)"
+
+# The build starts from the newest FROM image that can be pulled: a plain `docker build` would keep a local one, and
+# with it the Debian packages of the first build. A failed pull must not fail the install; a local copy is used (a
+# missing one is left to the build). The image is the first FROM of Dockerfile.base, so Renovate's bumps need no change here.
+refresh_from() {
+  local from out
+  from="$(awk '$1 == "FROM" { print $2; exit }' "$REPO_DIR/Dockerfile.base")"
+  case "$from" in ''|*'$'*|--*) return 0 ;; esac
+  info "Pulling the image '$from' the base is built from"
+  if out="$(docker pull "$from" 2>&1)"; then
+    ok "Image is current"
+  elif [ -n "$(docker image ls -q "$from" 2>/dev/null)" ]; then
+    printf '%s  Could not pull %s (%s); building on the local copy.%s\n' "$DIM" "$from" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+  else
+    printf '%s  Could not pull %s (%s) and there is no local copy; the build will try again.%s\n' "$DIM" "$from" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+  fi
+  echo
+}
+
+build_base() {
+  refresh_from
+  info "Building the base image '$BASE_IMAGE'"
+  docker build --progress=plain -f "$REPO_DIR/Dockerfile.base" -t "$BASE_IMAGE" "$REPO_DIR" 2>&1 \
+    | sed $'s/\e\\[[0-9;]*m//g' \
+    | while IFS= read -r line; do printf '%s  %s%s\n' "$DIM" "$line" "$RESET"; done
+  ok "Base image built"
+  echo
+}
+
+ensure_base() {
+  local out
+  if [ -n "${AGENT_POD_BUILD_BASE:-}" ]; then build_base; return; fi
+  info "Pulling the base image '$BASE_IMAGE'"
+  if out="$(docker pull "$BASE_IMAGE" 2>&1)"; then
+    ok "Base image is current"; echo
+  elif [ -n "$(docker image ls -q "$BASE_IMAGE" 2>/dev/null)" ]; then
+    printf '%s  Could not pull it (%s); using the local copy.%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"; echo
+  else
+    printf '%s  Could not pull it (%s); building it here.%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"; echo
+    build_base
+  fi
+}
+ensure_base
 
 # Builds agent-pod:<agent>. The agent-specific values are the same ones as in the launcher's table.
 install_agent() {
@@ -67,7 +120,7 @@ install_agent() {
   # For pinned versions, the version literal is itself the cache key, so the layer rebuilds whenever the pin
   # changes. For an unresolved dist-tag the literal never changes while the version it points to does, so
   # we pass CACHEBUST=$(date +%s) to force a refetch.
-  local build_args=(--build-arg "AGENT=$agent" --build-arg "AGENT_PKG=$pkg"
+  local build_args=(--build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "AGENT=$agent" --build-arg "AGENT_PKG=$pkg"
                     --build-arg "AGENT_VERSION=$version" --build-arg "AGENT_CHANNEL=$channel_label"
                     --build-arg "BUILD_HASH=$(build_hash)")
   if [[ ! "$version" =~ ^[0-9] ]]; then

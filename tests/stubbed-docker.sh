@@ -40,6 +40,7 @@ AGENT="${AGENT-claude}"
 #   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
+#   STUB_PULL_FAIL=1      `docker pull` fails like a registry rate limit
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
@@ -57,6 +58,7 @@ case "$1" in
     # the agent image: present, unless STUB_NO_IMAGE=1 and the (stub) install.sh has not run
     if [ "$2" = ls ] && { [ -z "${STUB_NO_IMAGE:-}" ] || [ -e "$STUB_DIR/installed" ]; }; then echo abc123; fi
     exit 0 ;;
+  pull) [ -z "${STUB_PULL_FAIL:-}" ] || { echo 'Error response from daemon: toomanyrequests: You have reached your pull rate limit.' >&2; exit 1; }; exit 0 ;;
   build) cat > "$STUB_DIR/dockerfile"; : > "$STUB_DIR/built"; exit "${STUB_BUILD_FAIL:-0}" ;;
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
   volume)
@@ -594,19 +596,55 @@ test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash
   [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "rebuilt twice: once for the repository, once for a release"
 }
 
-test_build_hash() {   # the hash install.sh stores in the image changes with each of its inputs and with nothing else
-  local d h0 h1 h2 h
+test_build_hash() {   # the hashes install.sh uses change with each of their inputs and with nothing else
+  local d b0 h0 h1 h2 h3 b1 b2 h
   setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
-  printf 'FROM x\n' > "$d/Dockerfile"; printf 'a\n' > "$d/pod-environment.md"
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'FROM base\n' > "$d/Dockerfile.base"; printf 'a\n' > "$d/pod-environment.md"
   h0="$("$d/install.sh" --build-hash)" || fail "--build-hash failed"
+  b0="$("$d/install.sh" --base-hash)" || fail "--base-hash failed"
   [[ "$h0" =~ ^[0-9a-f]{16}$ ]] || fail "not 16 hex characters: '$h0'"
+  [[ "$b0" =~ ^[0-9a-f]{16}$ ]] || fail "not 16 hex characters: '$b0'"
+  [ "$h0" != "$b0" ] || fail "the two hashes are the same"
   [ "$("$d/install.sh" --build-hash)" = "$h0" ] || fail "the hash is not stable for the same inputs"
+  # the agent Dockerfile: the agent image changes, the base does not
   printf 'FROM y\n' > "$d/Dockerfile"; h1="$("$d/install.sh" --build-hash)"
   [ -n "$h1" ] && [ "$h1" != "$h0" ] || fail "a changed Dockerfile did not change the hash"
-  printf 'FROM x\n' > "$d/Dockerfile"; printf 'b\n' > "$d/pod-environment.md"; h2="$("$d/install.sh" --build-hash)"
-  [ -n "$h2" ] && [ "$h2" != "$h0" ] && [ "$h2" != "$h1" ] || fail "a changed pod-environment.md did not change the hash"
+  [ "$("$d/install.sh" --base-hash)" = "$b0" ] || fail "a changed agent Dockerfile changed the base hash"
+  # the base Dockerfile: both change
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'FROM base2\n' > "$d/Dockerfile.base"; h2="$("$d/install.sh" --build-hash)"; b1="$("$d/install.sh" --base-hash)"
+  [ -n "$h2" ] && [ "$h2" != "$h0" ] && [ "$h2" != "$h1" ] || fail "a changed Dockerfile.base did not change the hash"
+  [ -n "$b1" ] && [ "$b1" != "$b0" ] || fail "a changed Dockerfile.base did not change the base hash"
+  # pod-environment.md: both change
+  printf 'FROM base\n' > "$d/Dockerfile.base"; printf 'b\n' > "$d/pod-environment.md"; h3="$("$d/install.sh" --build-hash)"; b2="$("$d/install.sh" --base-hash)"
+  [ -n "$h3" ] && [ "$h3" != "$h0" ] && [ "$h3" != "$h1" ] && [ "$h3" != "$h2" ] || fail "a changed pod-environment.md did not change the hash"
+  [ -n "$b2" ] && [ "$b2" != "$b0" ] && [ "$b2" != "$b1" ] || fail "a changed pod-environment.md did not change the base hash"
   printf 'a\n' > "$d/pod-environment.md"; h="$("$d/install.sh" --build-hash)"
   [ "$h" = "$h0" ] || fail "restoring the inputs did not restore the hash"
+  [ "$("$d/install.sh" --base-hash)" = "$b0" ] || fail "restoring the inputs did not restore the base hash"
+}
+
+test_base_image() {   # install.sh pulls the published base; a failed pull uses the local copy, then builds it; the agent builds on it
+  local d
+  inst() {   # inst <VAR=value>... : runs a copy of install.sh next to Dockerfiles whose first FROM is node:9-slim
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+    printf 'ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n' > "$d/Dockerfile"; printf 'FROM node:9-slim AS first\nFROM other:2\n' > "$d/Dockerfile.base"
+    printf 'a\n' > "$d/pod-environment.md"
+    TAG="test.invalid/base:$("$d/install.sh" --base-hash)"
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" AGENT_POD_BASE_REPO=test.invalid/base "$@" ./install.sh claude </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  # the published tag is pulled, nothing is built for the base, and the agent image is built on it
+  inst; rc_is 0; logged "^pull $TAG\$"; not_logged 'node:9-slim'; not_logged 'other:2'; not_logged '-f .*Dockerfile.base'
+  logged "--build-arg BASE_IMAGE=$TAG "; order "^pull $TAG\$" '^build .*BASE_IMAGE'
+  # a failed pull (a rate limit) with a local copy: that copy is used, the install goes on and says why
+  inst STUB_PULL_FAIL=1; rc_is 0; in_out 'toomanyrequests'; in_out 'using the local copy'; not_logged '-f .*Dockerfile.base'; logged '^tag '
+  # no local copy either: the base is built here from Dockerfile.base, after pulling the image it is built from (the first FROM only)
+  inst STUB_PULL_FAIL=1 STUB_NO_IMAGE=1; rc_is 0; in_out 'building it here'
+  logged "^build .*-f .*Dockerfile.base -t $TAG "; logged '^pull node:9-slim$'; not_logged 'other:2'
+  order "^pull $TAG\$" '^pull node:9-slim$' '^build .*-f .*Dockerfile.base' '^build .*BASE_IMAGE'
+  # the image the base is built from cannot be pulled, but a local copy exists: the base is built on it
+  inst AGENT_POD_BUILD_BASE=1 STUB_PULL_FAIL=1; rc_is 0; in_out 'building on the local copy'; logged '^build .*-f .*Dockerfile.base'
+  # AGENT_POD_BUILD_BASE=1: the base is always built here, the published tag is not even pulled
+  inst AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged "^pull $TAG\$"; logged '^pull node:9-slim$'; logged '^build .*-f .*Dockerfile.base'
 }
 
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
@@ -680,9 +718,23 @@ run_mutants() {
   mutate test_rebuild_on_repo_change '"$A_VERSION_VAR=${_asked:-$A_CHANNEL}"' '"$A_VERSION_VAR=$A_CHANNEL"' || rc=1
   mutate test_rebuild_on_repo_change 'if [ -z "$_tried" ] && command -v curl' 'if command -v curl' || rc=1
   mutate test_rebuild_on_repo_change '_tried=1   # whatever the outcome' ': # whatever the outcome' || rc=1
-  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/Dockerfile"' install.sh || rc=1
-  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/pod-environment.md"' install.sh || rc=1
-  mutate test_build_hash '| cut -c1-16' "| cut -c1-16 | sed 's/.*/0123456789abcdef/'" install.sh || rc=1
+  mutate test_build_hash 'cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md"' 'cat "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md"' install.sh || rc=1
+  mutate test_build_hash 'cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md"' 'cat "$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' install.sh || rc=1
+  mutate test_build_hash 'cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md"' 'cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base"' install.sh || rc=1
+  mutate test_build_hash 'base_hash() { cat "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }' 'base_hash() { cat "$REPO_DIR/Dockerfile" "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }' install.sh || rc=1
+  mutate test_build_hash 'base_hash() { cat "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }' 'base_hash() { cat "$REPO_DIR/pod-environment.md" | hash16; }' install.sh || rc=1
+  mutate test_build_hash 'base_hash() { cat "$REPO_DIR/Dockerfile.base" "$REPO_DIR/pod-environment.md" | hash16; }' 'base_hash() { cat "$REPO_DIR/Dockerfile.base" | hash16; }' install.sh || rc=1
+  mutate test_build_hash '{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16' "{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16 | sed 's/.*/0123456789abcdef/'" install.sh || rc=1
+  mutate test_base_image '  if out="$(docker pull "$BASE_IMAGE" 2>&1)"; then' '  out="$(docker pull "$BASE_IMAGE" 2>&1)"; if true; then' install.sh || rc=1
+  mutate test_base_image '  elif [ -n "$(docker image ls -q "$BASE_IMAGE" 2>/dev/null)" ]; then' '  elif false; then' install.sh || rc=1
+  mutate test_base_image '  if [ -n "${AGENT_POD_BUILD_BASE:-}" ]; then build_base; return; fi' '  :' install.sh || rc=1
+  mutate test_base_image '--build-arg "BASE_IMAGE=$BASE_IMAGE" ' '' install.sh || rc=1
+  mutate test_base_image '  if out="$(docker pull "$from" 2>&1)"; then' '  out="$(docker pull "$from" 2>&1)"; if true; then' install.sh || rc=1
+  mutate test_base_image '  elif [ -n "$(docker image ls -q "$from" 2>/dev/null)" ]; then' '  elif false; then' install.sh || rc=1
+  mutate test_base_image '{ print $2; exit }' '{ print $2 }' install.sh || rc=1
+  mutate test_base_image '  refresh_from
+  info "Building' '  info "Building' install.sh || rc=1
+  mutate test_base_image $'\nensure_base\n' $'\n:\n' install.sh || rc=1
   return $rc
 }
 

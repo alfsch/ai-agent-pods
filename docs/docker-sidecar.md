@@ -18,7 +18,7 @@ host Docker  ──runs──▶  pod (agent-pod:<agent> image)         cap-drop
   socket is never mounted. The pod only has the `docker` CLI (plus Compose and Buildx) with `DOCKER_HOST`
   pointing at the sidecar.
 - `DOCKER_CACHE=1` additionally keeps the sidecar's data directory in a per-project named volume.
-- Everything is in the `agent-pod` launcher script; `install.sh`, `uninstall.sh`, `Dockerfile` and
+- Everything is in the `agent-pod` launcher script; `install.sh`, `uninstall.sh`, `Dockerfile`, `Dockerfile.base` and
   `renovate.json` have small supporting changes (CLI in the image, volume cleanup on uninstall, digest
   pins kept current by Renovate).
 

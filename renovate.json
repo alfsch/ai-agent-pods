@@ -4,7 +4,7 @@
   "forkProcessing": "enabled",
   "customManagers": [
     {
-      "description": "Keep the node base image literal in uninstall.sh and the README in sync with the Dockerfile",
+      "description": "Keep the node base image literal in uninstall.sh and the README in sync with Dockerfile.base",
       "customType": "regex",
       "managerFilePatterns": ["/^uninstall\\.sh$/", "/^README\\.md$/"],
       "matchStrings": ["node:(?<currentValue>\\d[\\w.]*-slim)"],
@@ -29,7 +29,14 @@
       "groupName": "node base image"
     },
     {
-      "description": "Pin yq's image digest (the Dockerfile COPYs the binary out of it); Renovate updates tag and digest together",
+      "description": "Pin the node base image of Dockerfile.base by digest: a tag like 24-slim is republished under the same name, so without the digest Renovate would never see those rebuilds. Only the Dockerfile; the tag literals in uninstall.sh and the README stay plain tags",
+      "matchDepNames": ["node"],
+      "matchDatasources": ["docker"],
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true
+    },
+    {
+      "description": "Pin yq's image digest (Dockerfile.base COPYs the binary out of it); Renovate updates tag and digest together",
       "matchDepNames": ["mikefarah/yq"],
       "matchDatasources": ["docker"],
       "pinDigests": true
