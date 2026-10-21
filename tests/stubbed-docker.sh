@@ -514,10 +514,8 @@ test_config_file_outside_state_dir() {   # the config file is host-owned, in the
   rc_is 0; logged " -v $f:/home/agent-pod/.claude.json "; not_logged "$H/.claude-pod/.claude.json"
   [ "$(ls -l "$CASE/secret" | cut -c1-10)" = "-rw-r--r--" ] || fail "the host file behind the symlink was chmodded"
   [ "$(cat "$f")" = '{}' ] || fail "a symlink in the state dir was copied as the config"
-  # a regular file from an earlier version is copied once; an existing config is never overwritten
-  setup_case; f="$H/config/agent-pod/claude.json"; mkdir -p "$H/.claude-pod"; printf '{"login":1}' > "$H/.claude-pod/.claude.json"
-  AGENT=claude launch -- true; rc_is 0
-  [ "$(cat "$f")" = '{"login":1}' ] || fail "the config of an earlier version was not carried over"
+  # an existing config is never overwritten
+  setup_case; f="$H/config/agent-pod/claude.json"; mkdir -p "$H/config/agent-pod"
   printf '{"new":1}' > "$f"; AGENT=claude launch -- true; rc_is 0
   [ "$(cat "$f")" = '{"new":1}' ] || fail "an existing config was overwritten"
 }
@@ -622,11 +620,7 @@ run_mutants() {
   printf' || rc=1
   mutate test_stdin_attached 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm")' || rc=1
   mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
-  mutate test_config_file_outside_state_dir 'if [ ! -e "$A_CFG_PATH" ]; then
-  cp -P' 'if true; then
-  cp -P' || rc=1
-  mutate test_config_file_outside_state_dir 'cp -P "$A_STATE_DIR' 'cp "$A_STATE_DIR' || rc=1
-  mutate test_config_file_outside_state_dir '[ ! -L "$A_CFG_PATH" ] || rm -f "$A_CFG_PATH"' 'true' || rc=1
+  mutate test_config_file_outside_state_dir '[ -s "$A_CFG_PATH" ] || printf' 'printf' || rc=1
   mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1

@@ -141,13 +141,6 @@ mkdir -p "$A_STATE_DIR"
 A_CFG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod"
 A_CFG_PATH="$A_CFG_HOME/$AGENT.json"
 mkdir -p "$A_CFG_HOME"
-# Earlier versions kept the file in the state dir: copy it over once, so logins survive. The old one may have been
-# replaced by the pod, so cp does not follow a symlink (-P; a check before the copy could be overtaken by a pod that is
-# still running), and a link that was copied is deleted again.
-if [ ! -e "$A_CFG_PATH" ]; then
-  cp -P "$A_STATE_DIR/$A_CFG_FILE" "$A_CFG_PATH" 2>/dev/null || true
-  [ ! -L "$A_CFG_PATH" ] || rm -f "$A_CFG_PATH"
-fi
 # Docker creates a directory at the target if the source path is missing, so the file must pre-exist on the host
 # before `docker run`. The agent treats an empty file as a JSON parse error, not as "no config", so seed it with {}.
 [ -s "$A_CFG_PATH" ] || printf '{}' > "$A_CFG_PATH"
