@@ -103,6 +103,20 @@ for a in claude copilot; do
     check "agent-pod:$a has: $t" docker run --rm "agent-pod:$a" sh -c "$t"
   done
 done
+# pod-environment.md tells the agents which tools exist: every tool on its "Tools on PATH" line must be there, and the
+# file must be where each agent looks for it.
+ENV_TOOLS="$(sed -n 's/^Tools on PATH: //p' "$ROOT/pod-environment.md" | tr -d ' ' | tr ',' ' ')"
+check "pod-environment.md lists its tools" test -n "$ENV_TOOLS"
+for a in claude copilot; do
+  for t in $ENV_TOOLS; do
+    check "agent-pod:$a has the tool pod-environment.md names: $t" docker run --rm "agent-pod:$a" sh -c "command -v $t"
+  done
+  check "agent-pod:$a has /etc/claude-code/CLAUDE.md as in the repo" bash -c 'docker run --rm "$0" cat /etc/claude-code/CLAUDE.md | cmp -s - "$1"' "agent-pod:$a" "$ROOT/pod-environment.md"
+  # for Copilot the same text with front matter that applies it to every file (a plain AGENTS.md there counted as nested)
+  check "agent-pod:$a has the instructions for Copilot, applied to every file" bash -c 'docker run --rm "$0" cat /etc/agent-pod/pod-environment.instructions.md | cmp -s - <(printf -- "---\napplyTo: \"**\"\n---\n\n"; cat "$1")' "agent-pod:$a" "$ROOT/pod-environment.md"
+  check "agent-pod:$a has no AGENTS.md in /etc/agent-pod" bash -c 'docker run --rm "$0" test ! -e /etc/agent-pod/AGENTS.md' "agent-pod:$a"
+  check "agent-pod:$a points Copilot at /etc/agent-pod" bash -c 'docker run --rm "$0" sh -c "echo \$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" | grep -qx /etc/agent-pod' "agent-pod:$a"
+done
 check "agent-pod:claude does not carry Copilot CLI" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:claude copilot
 check "agent-pod:copilot does not carry Claude Code" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:copilot claude
 

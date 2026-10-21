@@ -49,6 +49,17 @@ LABEL agent-pod.agent=${AGENT} \
 # Create a dedicated, globally writable home directory for our dynamic runtime user.
 RUN mkdir -p /home/agent-pod && chmod 777 /home/agent-pod
 
+# What the agents should know about the environment (tools, no root, Docker only with DOCKER=1), in the places they
+# read on their own. The state dirs are mounted over ~/.claude and ~/.copilot, so the usual user-level files there
+# would be hidden. Claude Code reads /etc/claude-code/CLAUDE.md (managed memory; seen in /memory). Copilot CLI reads
+# *.instructions.md files from the directories in COPILOT_CUSTOM_INSTRUCTIONS_DIRS; a plain AGENTS.md there was
+# taken as a nested one that applies only to files below /etc/agent-pod, so the file has the front matter that
+# applies it to every file. Same text for both.
+COPY pod-environment.md /etc/claude-code/CLAUDE.md
+RUN mkdir -p /etc/agent-pod \
+ && { printf -- '---\napplyTo: "**"\n---\n\n'; cat /etc/claude-code/CLAUDE.md; } > /etc/agent-pod/pod-environment.instructions.md
+ENV COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/etc/agent-pod
+
 # Interactive-shell setup, appended to /etc/bash.bashrc. Only interactive bash sources this file, so
 # none of it touches the non-interactive `agent-pod <agent> ...` path. The dynamic, /etc/passwd-less
 # user has no $HOME/.bashrc of its own, so these baseline conveniences have to live in the system-wide
