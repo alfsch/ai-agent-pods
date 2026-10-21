@@ -151,6 +151,11 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 
 No `sudo`, no writes to `/usr/local`, `/etc`, shell rc files, or your existing `~/.claude/` / `~/.copilot/`.
 
+## Contributing
+
+Rules for people and AI agents are in [`AGENTS.md`](AGENTS.md). Run `tests/check.sh` (syntax, ShellCheck, stub tests
+with mutants) before a pull request; CI runs the same steps.
+
 ## Reference
 
 ### Platforms
