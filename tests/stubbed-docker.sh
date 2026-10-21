@@ -40,6 +40,7 @@ AGENT="${AGENT-claude}"
 #   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
+#   STUB_PULL_FAIL=1      `docker pull` fails like a registry rate limit
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
@@ -57,6 +58,7 @@ case "$1" in
     # the agent image: present, unless STUB_NO_IMAGE=1 and the (stub) install.sh has not run
     if [ "$2" = ls ] && { [ -z "${STUB_NO_IMAGE:-}" ] || [ -e "$STUB_DIR/installed" ]; }; then echo abc123; fi
     exit 0 ;;
+  pull) [ -z "${STUB_PULL_FAIL:-}" ] || { echo 'Error response from daemon: toomanyrequests: You have reached your pull rate limit.' >&2; exit 1; }; exit 0 ;;
   build) cat > "$STUB_DIR/dockerfile"; : > "$STUB_DIR/built"; exit "${STUB_BUILD_FAIL:-0}" ;;
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
   volume)
@@ -609,6 +611,21 @@ test_build_hash() {   # the hash install.sh stores in the image changes with eac
   [ "$h" = "$h0" ] || fail "restoring the inputs did not restore the hash"
 }
 
+test_base_refresh() {   # install.sh pulls the base image of the Dockerfile before building; a failed pull falls back to the local copy
+  local d
+  inst() {   # inst <VAR=value>... : runs a copy of install.sh next to a Dockerfile with two stages
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+    printf 'FROM base:1 AS first\nFROM other:2\n' > "$d/Dockerfile"; printf 'a\n' > "$d/pod-environment.md"
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" "$@" ./install.sh claude </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  # pulled first, and only the first FROM; the build follows
+  inst; rc_is 0; logged '^pull base:1$'; not_logged 'other:2'; order '^pull base:1$' '^build '
+  # a rate limit with a local copy of the base: the install goes on and says why
+  inst STUB_PULL_FAIL=1; rc_is 0; in_out 'toomanyrequests'; in_out 'building on the local copy'; logged '^build '; logged '^tag '
+  # a rate limit without a local copy: left to the build, which fails or pulls by itself
+  inst STUB_PULL_FAIL=1 STUB_NO_IMAGE=1; rc_is 0; in_out 'no local copy'; logged '^build '
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
@@ -683,6 +700,10 @@ run_mutants() {
   mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/Dockerfile"' install.sh || rc=1
   mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/pod-environment.md"' install.sh || rc=1
   mutate test_build_hash '| cut -c1-16' "| cut -c1-16 | sed 's/.*/0123456789abcdef/'" install.sh || rc=1
+  mutate test_base_refresh '  if out="$(docker pull "$base" 2>&1)"; then' '  out="$(docker pull "$base" 2>&1)"; if true; then' install.sh || rc=1
+  mutate test_base_refresh '  elif [ -n "$(docker image ls -q "$base" 2>/dev/null)" ]; then' '  elif false; then' install.sh || rc=1
+  mutate test_base_refresh '{ print $2; exit }' '{ print $2 }' install.sh || rc=1
+  mutate test_base_refresh $'\nrefresh_base\n' $'\n:\n' install.sh || rc=1
   return $rc
 }
 

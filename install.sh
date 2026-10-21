@@ -35,6 +35,26 @@ esac
 command -v docker >/dev/null || die "Docker is required but not on PATH."
 docker info >/dev/null 2>&1 || die "Docker daemon is not running."
 
+# Builds start from the newest base image that can be pulled: a plain `docker build` would keep a base image that is
+# already local, and with it the Debian packages of the first build. A failed pull (offline, a registry rate limit)
+# must not fail the install, so it falls back to the local copy, and only a missing local copy is left to the build.
+# The image is the first FROM of the Dockerfile, so Renovate's bumps of it need no change here.
+refresh_base() {
+  local base out
+  base="$(awk '$1 == "FROM" { print $2; exit }' "$REPO_DIR/Dockerfile")"
+  case "$base" in ''|*'$'*|--*) return 0 ;; esac
+  info "Pulling the base image '$base'"
+  if out="$(docker pull "$base" 2>&1)"; then
+    ok "Base image is current"
+  elif [ -n "$(docker image ls -q "$base" 2>/dev/null)" ]; then
+    printf '%s  Could not pull %s (%s); building on the local copy.%s\n' "$DIM" "$base" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+  else
+    printf '%s  Could not pull %s (%s) and there is no local copy; the build will try again.%s\n' "$DIM" "$base" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+  fi
+  echo
+}
+refresh_base
+
 # Builds agent-pod:<agent>. The agent-specific values are the same ones as in the launcher's table.
 install_agent() {
   local agent="$1" name pkg channel version_var requested channel_label version resolved

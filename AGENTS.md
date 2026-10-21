@@ -63,6 +63,8 @@ test that fails without it.
   project leave hooks or MCP entries for the next session in another; it is documented in the README, with the way to
   separate untrusted work (another `HOME`). Do not "fix" it by silently changing what is shared.
 - `node:24-slim` in `uninstall.sh` and the README is kept in sync with the Dockerfile by Renovate's regex manager.
+- `install.sh` pulls the Dockerfile's first `FROM` image before every build and, if the pull fails, builds on the local
+  copy (a registry rate limit must not fail a start). It is not `docker build --pull`, which fails hard.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.
