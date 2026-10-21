@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ANSI color codes for consistent error formatting
+BOLD=$'\e[1m'; RED=$'\e[31m'; RESET=$'\e[0m'
+[[ -t 1 ]] || { BOLD=; RED=; RESET=; }
+err() { printf '%s✗%s %s\n' "$RED" "$RESET" "$*" >&2; }
+die() { err "$*"; exit 1; }
+
+# The directory of this script (install.sh is next to it), with symlinks resolved: claude-pod and copilot-pod are
+# symlinks to it. SELF is the name it was called by.
+SELF="$(basename "${BASH_SOURCE[0]}")"
+_src="${BASH_SOURCE[0]}"
+while [ -L "$_src" ]; do
+  _link="$(readlink "$_src")"
+  case "$_link" in /*) _src="$_link" ;; *) _src="$(dirname "$_src")/$_link" ;; esac
+done
+HERE="$(cd "$(dirname "$_src")" && pwd)"
+
+# Which agent runs: the name this script was called by (claude-pod, copilot-pod) or its first argument. What
+# follows is the command to run inside the container, as before; without one you get a shell.
+AGENT=
+case "$SELF" in claude-pod) AGENT=claude ;; copilot-pod) AGENT=copilot ;; esac
+if [ -z "$AGENT" ]; then case "${1:-}" in claude|copilot) AGENT="$1"; shift ;; esac; fi
+
+# --help / -h: print copy-pastable usage and exit BEFORE any Docker work, so help still works when Docker is down or
+# no image is built yet. HERE is where the repo lives, so every command printed is copy-pastable as-is, wherever the
+# repo was cloned and whether or not the aliases are set up.
+usage() {
+  row() { printf '  %-18s %s%s%s\n' "$1" "$BOLD" "$2" "$RESET"; }
+  printf '%sagent-pod%s — run Claude Code or Copilot CLI in a Docker sandbox scoped to the current folder.\n' "$BOLD" "$RESET"
+  printf '\n%sRun%s  (cd into your project first — the current folder is what gets mounted):\n' "$BOLD" "$RESET"
+  row "Open a shell:"      "$HERE/agent-pod claude          (or: copilot)"
+  row "Run Claude Code:"   "$HERE/agent-pod claude claude --dangerously-skip-permissions"
+  row "Run Copilot CLI:"   "$HERE/agent-pod copilot copilot --yolo"
+  printf '\n%sManage%s  (works from any folder; the first start builds the image of that agent by itself):\n' "$BOLD" "$RESET"
+  row "Install/update:"    "$HERE/install.sh [claude|copilot]"
+  row "Pin a version:"     "CLAUDE_CODE_VERSION=2.0.0 $HERE/install.sh claude"
+  row ""                   "COPILOT_CLI_VERSION=2.0.0 $HERE/install.sh copilot"
+  row "Newest build:"      "CLAUDE_CODE_VERSION=latest $HERE/install.sh claude"
+  row "Uninstall:"         "$HERE/uninstall.sh"
+  printf '\n%sOptions%s  (prefix any run command):\n' "$BOLD" "$RESET"
+  row "Publish ports:"     "PORTS=\"3000 5173\" $HERE/agent-pod claude"
+  row "Isolate/limit:"     "NET=none MEMORY=4g PIDS=512 $HERE/agent-pod claude"
+  row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
+  row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
+  printf '\n'
+  row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
+  row ""                   "alias copilot-pod=$HERE/copilot-pod"
+  row "Full README:"       "https://github.com/alfsch/ai-agent-pods"
+}
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then usage; exit 0; fi
+if [ -z "$AGENT" ]; then
+  usage >&2; printf '\n' >&2
+  die "Which agent? Use '$SELF claude' or '$SELF copilot' (or call it as claude-pod or copilot-pod)."
+fi
+
+# The agent-specific part, in one place; everything below is the same for every agent.
+#   A_NAME / A_BIN         what to call it, and its command inside the image
+#   A_PKG / A_CHANNEL      its npm package, and the dist-tag that install.sh and the start-up check follow
+#   A_VERSION_VAR          the variable that pins a version for install.sh
+#   A_STATE_DIR            host-side state (login, history), kept at the names the single-agent tools used, so that
+#                          existing logins keep working
+#   A_CFG_DIR / A_CFG_FILE where the agent reads its state in HOME, and its main config file (a sibling of that dir)
+#   A_NOUPDATE             NAME=value that turns off the agent's own self-updater
+#   A_FORWARD              host variables that are forwarded when set (token login)
+case "$AGENT" in
+  claude)
+    A_NAME="Claude Code"; A_BIN=claude; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
+    A_VERSION_VAR=CLAUDE_CODE_VERSION
+    A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json
+    A_NOUPDATE=DISABLE_AUTOUPDATER=1
+    A_FORWARD=
+    ;;
+  copilot)
+    A_NAME="Copilot CLI"; A_BIN=copilot; A_PKG=@github/copilot; A_CHANNEL=latest
+    A_VERSION_VAR=COPILOT_CLI_VERSION
+    A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json
+    A_NOUPDATE=COPILOT_AUTO_UPDATE=false
+    A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"
+    ;;
+esac
+IMAGE="agent-pod:$AGENT"
+
+# Preflight checks, in causal order. Without these the failures surface as cryptic Docker errors:
+#   - daemon down -> the image check below would falsely blame a missing image.
+#   - missing image -> built right here (first start only); without the check Docker would try to pull it from Docker Hub.
+# We probe existence with `image ls -q`, not `image inspect`: it resolves the name the same way
+# `docker run` does, so the check can't disagree with whether the run will actually work. (Some
+# Docker Desktop builds have a broken `image inspect <name>` that false-negatives on a present
+# image, which would otherwise wrongly rebuild it.)
+command -v docker >/dev/null || die "Docker is required but not on PATH."
+docker info >/dev/null 2>&1 || die "Docker daemon is not running."
+if [ -z "$(docker image ls -q "$IMAGE" 2>/dev/null)" ]; then
+  printf '%s●%s No image for %s yet: building it (first start only)...\n' "$BOLD" "$RESET" "$A_NAME" >&2
+  "$HERE/install.sh" "$AGENT" >&2 || die "Could not build the image for $A_NAME. Run '$HERE/install.sh $AGENT' to see why."
+fi
+
+# Auto-update on every start: if the image was built from the agent's default channel (label set by install.sh)
+# and npm's current version on that channel differs from what's installed, rebuild via install.sh before launching.
+# Images pinned to a version are left alone, as are images built before the labels existed. The check is
+# best-effort: a slow/offline registry (3s cap) or a failed rebuild only prints a note and continues with the
+# existing image. Set AGENT_POD_NO_UPDATE=1 to skip it (CLAUDE_POD_NO_UPDATE and COPILOT_POD_NO_UPDATE still work).
+# Output goes to stderr so piped stdout stays clean.
+if [ -z "${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}" ] && command -v curl >/dev/null; then
+  # Inspect by image ID (found via `image ls -q`, like the preflight above), not by name — see the
+  # Docker Desktop note there. A failed lookup leaves the labels empty, which just skips the update.
+  _image_id="$(docker image ls -q "$IMAGE" 2>/dev/null | head -n1 || true)"
+  _label() { [ -n "$_image_id" ] && docker image inspect --format "{{index .Config.Labels \"$1\"}}" "$_image_id" 2>/dev/null || true; }
+  if [ "$(_label agent-pod.channel)" = "$A_CHANNEL" ]; then
+    _installed="$(_label agent-pod.version)"
+    # If install.sh couldn't resolve the channel at build time, the label holds the literal tag; ask the
+    # image for the real version so an up-to-date image isn't needlessly rebuilt.
+    if [[ ! "$_installed" =~ ^[0-9] ]]; then
+      _installed="$(docker run --rm "$IMAGE" "$A_BIN" --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\).*/\1/p' || true)"
+    fi
+    _newest="$(curl -fsSL --max-time 3 "https://registry.npmjs.org/-/package/$A_PKG/dist-tags" 2>/dev/null \
+      | sed -n "s/.*\"$A_CHANNEL\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
+    if [ -n "$_newest" ] && [ "$_newest" != "$_installed" ]; then
+      printf '%s●%s New %s %s (installed: %s) — updating image...\n' "$BOLD" "$RESET" "$A_NAME" "$_newest" "${_installed:-unknown}" >&2
+      # Force the channel: an exported version variable must not turn this into a pinned image.
+      env "$A_VERSION_VAR=$A_CHANNEL" "$HERE/install.sh" "$AGENT" >&2 \
+        || err "Update failed; continuing with the existing image."
+    fi
+  fi
+fi
+
+# Host-side state dir: persists the agent's auth + history across container restarts.
+mkdir -p "$A_STATE_DIR"
+
+# The agent reads its main config from $HOME/$A_CFG_FILE (a file at HOME, sibling to the $A_CFG_DIR/ directory).
+# We bind-mount this file separately so login state survives. Two quirks:
+#   - Docker creates a directory at the target if the source path is missing, so the file must
+#     pre-exist on the host before `docker run`.
+#   - The agent treats an empty file as a JSON parse error, not as "no config", so we seed it with {}.
+[ -s "$A_STATE_DIR/$A_CFG_FILE" ] || printf '{}' > "$A_STATE_DIR/$A_CFG_FILE"
+
+# Restrict to owner-only. The directory holds the agent's auth token and session transcripts
+# (which can contain code, file contents, and command output the agent saw); on multi-user hosts the
+# default 755/644 modes would let other local users read both. Matches the convention used for
+# ~/.ssh, ~/.aws, ~/.gnupg.
+chmod 700 "$A_STATE_DIR"
+chmod 600 "$A_STATE_DIR/$A_CFG_FILE"
+
+# Mounts & Users:
+#   --user -> dynamic                            Runs container exactly as the host user to prevent permission issues.
+#   HOME=/home/agent-pod                         Because user is dynamic, we use a dedicated writable home dir.
+#   $PWD -> $PWD                                 project files; same path on both sides keeps file
+#                                                references (logs, errors, tool output) consistent
+#                                                between host and container.
+#   $A_STATE_DIR -> /home/agent-pod/$A_CFG_DIR   credentials, sessions, history (the agent's state dir).
+#   $A_STATE_DIR/$A_CFG_FILE -> ditto            account binding + project trust state (sibling file).
+# TTY Detection:
+#   If we pipe data into the script (e.g. `cat file | agent-pod claude`), input is not a terminal.
+#   Passing `-t` to Docker in this case would cause a crash.
+#   [ -t 0 ] checks if STDIN is a terminal. If yes, keep it interactive (-i).
+#   [ -t 1 ] checks if STDOUT is a terminal. If yes, allocate a pseudo-TTY (-t).
+DOCKER_FLAGS=("--rm")
+[ -t 0 ] && DOCKER_FLAGS+=("-i")
+[ -t 1 ] && DOCKER_FLAGS+=("-t")
+
+# Optional Port Mapping:
+#   Allows users to map dev servers by passing PORTS="3000 8080:80".
+#   We force binding to 127.0.0.1 to prevent exposing dev servers to public networks.
+#   Each entry must be either "PORT" or "HOST:CONTAINER", with both parts in the 1-65535 range.
+#   We validate up front so a typo surfaces as a clear error here rather than a cryptic Docker failure.
+if [ -n "${PORTS:-}" ]; then
+  for port in $PORTS; do
+    if [[ ! "$port" =~ ^[0-9]+(:[0-9]+)?$ ]]; then
+      die "PORTS entry '$port' is invalid; expected 'PORT' or 'HOST:CONTAINER' (digits only)."
+    fi
+    # Range-check each numeric component. 10# forces base-10 so "08"/"09" don't parse as octal.
+    IFS=':' read -ra _port_parts <<< "$port"
+    for _n in "${_port_parts[@]}"; do
+      if (( 10#$_n < 1 || 10#$_n > 65535 )); then
+        die "PORTS entry '$port' has '$_n' outside the 1-65535 range."
+      fi
+    done
+    if [[ "$port" == *":"* ]]; then
+      DOCKER_FLAGS+=("-p" "127.0.0.1:${port}")
+    else
+      DOCKER_FLAGS+=("-p" "127.0.0.1:${port}:${port}")
+    fi
+  done
+fi
+
+# Optional Network Isolation:
+#   By default the container has unrestricted outbound networking — the agent needs its API (api.anthropic.com for
+#   Claude Code, GitHub's Copilot API for Copilot CLI), and your builds need the npm/pip/etc. registries. Set
+#   NET=none to cut ALL networking for the run.
+#   Use this to inspect or build code from an untrusted source offline: with no network, a malicious
+#   payload can't exfiltrate the project or phone home. Note that the agent itself can't reach its API
+#   in this mode, so it's for sandboxed shell/build work, not for a live agent session.
+#   NET=none and PORTS are mutually exclusive — you can't publish a port on a container with no network.
+if [ "${NET:-}" = "none" ]; then
+  [ -n "${PORTS:-}" ] && die "NET=none and PORTS are mutually exclusive: a no-network container can't publish ports."
+  DOCKER_FLAGS+=("--network=none")
+fi
+
+# Resource Limits (host availability):
+#   Dropping capabilities does NOT stop fork() or memory allocation, so a runaway or malicious
+#   process inside the container can still fork-bomb or exhaust memory and drag the host down.
+#   --pids-limit caps total processes/threads. The default is generous enough for normal builds;
+#     raise it with PIDS= for very parallel builds, or lower it when running untrusted code.
+#   MEMORY/CPUS are opt-in with no default on purpose: a fixed memory cap would OOM-kill legitimate
+#     large builds, and the right ceiling depends on your host's RAM. Set e.g. MEMORY=4g CPUS=2
+#     when running code you don't trust.
+DOCKER_FLAGS+=("--pids-limit=${PIDS:-4096}")
+[ -n "${MEMORY:-}" ] && DOCKER_FLAGS+=("--memory=$MEMORY")
+[ -n "${CPUS:-}" ]   && DOCKER_FLAGS+=("--cpus=$CPUS")
+
+# Optional Docker access (DOCKER=1):
+#   Gives the session its own throwaway Docker daemon without weakening this container. A separate
+#   rootless Docker-in-Docker sidecar runs on a private per-run network; only it gets --privileged
+#   (rootless dockerd needs user namespaces, which the hardening above forbids). This container keeps
+#   every restriction and only gets the docker CLI pointing at the sidecar via DOCKER_HOST. It never
+#   touches the host's Docker socket, and works the same on Linux, macOS and Windows (WSL2).
+#   - The daemon requires mutual TLS (port 2376). The sidecar generates the certificates into a
+#     per-run volume that only it and this pod mount, so other containers and local host users that
+#     can reach the sidecar's bridge IP can't use the daemon. The port is never published.
+#   - $PWD is mounted into the sidecar at the same path so `docker run -v "$PWD:..."` resolves. The
+#     sidecar user is uid 1000 and an inner container's root maps to it, so on Linux hosts where your uid
+#     differs, inner containers could not write to the project. There the launcher builds a small
+#     derived sidecar image whose user has your uid (see "Host uid" in docs/docker-sidecar.md).
+#   - Images, containers and volumes of the inner daemon vanish when the session ends, unless
+#     DOCKER_CACHE=1: then the daemon's data dir lives in a named volume (agent-pod-docker-<SHA-256 of
+#     $PWD>, one per project) and image layers are reused across sessions. A named volume, not a host
+#     folder, because overlay storage doesn't work on macOS/Windows file shares and the dir must be
+#     owned by the sidecar's uid. Only one session per project may use it at a time, since two
+#     dockerd instances can't share a data dir (enforced by a fixed sidecar name). Trade-off: whatever a session pulled or built (including
+#     anything malicious or secret) is still there next time; uninstall.sh removes these volumes.
+#   - Ports published by inner containers live on the sidecar's network, not on the host.
+#   The sidecar image is pinned by digest (kept current by Renovate). Override it with DIND_IMAGE=...
+[ -n "${DIND_IMAGE:-}" ] && _dind_image_set=1 || _dind_image_set=
+DIND_IMAGE="${DIND_IMAGE:-docker:29-dind-rootless@sha256:825e451c9bd898245ca8fb07bd9a48999ccf33c0192fd68594c73aed7b67d11f}"
+# Automatic cleanup of old DOCKER_CACHE volumes. Docker doesn't record when a volume was last used, so
+# each cache gets an empty "stamp" file in STATE_DIR whose mtime is its last use: touched at session
+# start and end, and every start removes the volumes whose stamp is older than DOCKER_CACHE_MAX_AGE_DAYS
+# (default 90, 0 disables). One file per cache means touch is the whole update, so no locks or shared
+# state file are needed; the rare race (a start touching a cache just as another start deletes it) can
+# only cost a cache that has been idle for months, and a volume in use can't be removed anyway.
+# STATE_DIR is deliberately outside the agents' state dirs (~/.claude-pod, ~/.copilot-pod): those are mounted into the pod, so a session could
+# edit the stamps there and keep (or prematurely drop) its cache.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-pod/caches"
+prune_dind_caches() {
+  local max_days="${DOCKER_CACHE_MAX_AGE_DAYS:-90}" stamp name out
+  [[ "$max_days" =~ ^[0-9]+$ ]] || die "DOCKER_CACHE_MAX_AGE_DAYS must be a number of days (0 disables)."
+  max_days=$(( 10#$max_days ))   # values like 010 or 08 are decimal, not octal
+  [ "$max_days" -gt 0 ] || return 0
+  # NUL-delimited, so paths with spaces or glob characters stay one word; and only names of the form
+  # the launcher generates are ever passed to `docker volume rm`.
+  while IFS= read -r -d '' stamp; do
+    name="$(basename "$stamp")"
+    [[ "$name" =~ ^agent-pod-docker-[0-9a-f]{16}$ ]] || continue
+    if out="$(docker volume rm "$name" 2>&1)"; then
+      rm -f "$stamp"
+      printf '%s●%s Removed Docker cache %s (unused for over %s days)\n' "$BOLD" "$RESET" "$name" "$max_days" >&2
+    elif grep -qi 'no such volume' <<<"$out"; then
+      rm -f "$stamp"   # already gone (deleted by hand)
+    fi
+  done < <(find "$STATE_DIR" -type f -mmin +$(( max_days * 1440 )) -print0 2>/dev/null)
+}
+# Show the sidecar's last log lines and, for the known host-side cause, how to fix it.
+sidecar_failed() {
+  local logs
+  logs="$(docker logs "$DIND_NAME" 2>&1 | tail -n 20)"
+  printf '%s\n' "$logs" >&2
+  if grep -qi 'rootlesskit.*operation not permitted' <<<"$logs"; then
+    err "Rootless Docker needs unprivileged user namespaces. On Ubuntu 24.04+ AppArmor restricts them (kernel.apparmor_restrict_unprivileged_userns=1); see 'Requirements for DOCKER=1' in the README."
+  fi
+  die "$1"
+}
+cleanup_dind() {
+  # A second Ctrl-C/SIGTERM must not cut the cleanup short and leave the sidecar, network or
+  # certificate volume behind (a leftover cache sidecar would also block that project's next session).
+  trap '' INT TERM HUP
+  docker rm -f "$POD_NAME" >/dev/null 2>&1 || true
+  # Found by this run's label, never by name: a signal can land right after `docker run -d` created the
+  # sidecar but before we noted it, and a name clash (cache in use) must not remove the other session's
+  # sidecar. -v drops the sidecar's anonymous volumes, never the named cache volume.
+  _sidecar="$(docker ps -aq --filter "label=agent-pod.run=$RUN_ID" 2>/dev/null || true)"
+  # Graceful stop first so dockerd can shut down cleanly (it matters for a persistent cache); the forced
+  # removal is the fallback.
+  [ -z "$_sidecar" ] || { docker stop -t 10 $_sidecar >/dev/null 2>&1; docker rm -f -v $_sidecar >/dev/null 2>&1; } || true
+  [ -z "${DIND_CACHE_VOL:-}" ] || touch "$STATE_DIR/$DIND_CACHE_VOL" 2>/dev/null || true
+  docker network rm "$DIND_NET" >/dev/null 2>&1 || true
+  docker volume rm "$DIND_CERTS" >/dev/null 2>&1 || true
+}
+# Only 1 (or unset) is accepted: DOCKER=0 or DOCKER_CACHE=false must not start a privileged sidecar.
+for _v in DOCKER DOCKER_CACHE; do
+  [ -z "${!_v:-}" ] || [ "${!_v}" = 1 ] || die "$_v must be 1 (or unset), not '${!_v}'."
+done
+[ -n "${DOCKER_CACHE:-}" ] && [ -z "${DOCKER:-}" ] && die "DOCKER_CACHE=1 only works together with DOCKER=1."
+if [ -n "${DOCKER:-}" ]; then
+  [ "${NET:-}" = "none" ] && die "DOCKER=1 and NET=none are mutually exclusive: the pod needs a network to reach its Docker daemon."
+  # Unique per run (a bare PID can be reused after a kill -9, or collide across hosts sharing a daemon),
+  # so cleanup can only ever remove resources of this invocation.
+  RUN_ID="$$-$(date +%s)-$RANDOM"
+  DIND_NAME="agent-pod-dind-$RUN_ID"
+  DIND_NET="agent-pod-net-$RUN_ID"
+  DIND_CERTS="agent-pod-certs-$RUN_ID"
+  POD_NAME="agent-pod-run-$RUN_ID"
+  trap cleanup_dind EXIT
+  # Signals during startup: bash runs these only after the command in flight has finished, so cleanup
+  # never races a still-running `docker run -d`. They are replaced by stop_pod once the pod starts.
+  trap 'exit 143' TERM; trap 'exit 130' INT; trap 'exit 129' HUP
+  # Linux host with a uid other than 1000 (not root, which rootless dockerd cannot use): renumber the
+  # image's `rootless` user to the host uid, so inner containers can write to the project. A user-set
+  # DIND_IMAGE is used as is. The tag contains the base digest, so a new pin gets a new derived image.
+  DIND_UID=; DIND_GID=
+  if [ -z "$_dind_image_set" ] && [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 1000 ] && [ "$(id -u)" != 0 ]; then
+    DIND_UID="$(id -u)"; DIND_GID="$(id -g)"
+    # The subordinate id range for inner users stays at the image's 100000..165535 unless the host uid or gid
+    # lies in it: inner root would then map to the same outer id as a subordinate id, which Linux rejects, and
+    # the sidecar would not start. Then the next free block of 65536 ids at 200000, 300000, ... is used (two ids
+    # block at most two of them, and a fixed step cannot run past the 32-bit limit).
+    _sub=100000
+    while (( (DIND_UID >= _sub && DIND_UID < _sub + 65536) || (DIND_GID >= _sub && DIND_GID < _sub + 65536) )); do _sub=$(( _sub + 100000 )); done
+    _base="$DIND_IMAGE"; DIND_IMAGE="agent-pod-dind:uid$DIND_UID-gid$DIND_GID-${_base##*:}"
+    if [ -z "$(docker image ls -q "$DIND_IMAGE" 2>/dev/null)" ]; then
+      printf '%s●%s Building Docker sidecar image for uid %s (first start only)...\n' "$BOLD" "$RESET" "$DIND_UID" >&2
+      docker build -q -t "$DIND_IMAGE" --build-arg "BASE=$_base" --build-arg "U=$DIND_UID" --build-arg "G=$DIND_GID" --build-arg "SUB=$_sub" - >/dev/null <<'EOF' \
+        || die "Could not build the Docker sidecar image for uid $DIND_UID."
+ARG BASE
+FROM $BASE
+ARG U
+ARG G
+ARG SUB
+USER root
+RUN sed -i "s/^rootless:x:1000:1000:/rootless:x:$U:$G:/" /etc/passwd \
+ && sed -i "s/^rootless:x:1000:/rootless:x:$G:/" /etc/group \
+ && echo "rootless:$SUB:65536" | tee /etc/subuid > /etc/subgid \
+ && chown -R $U:$G /home/rootless
+USER rootless
+EOF
+    fi
+  fi
+  docker network create "$DIND_NET" >/dev/null || die "Could not create network for the Docker sidecar."
+  docker volume create "$DIND_CERTS" >/dev/null || die "Could not create certificate volume for the Docker sidecar."
+  DIND_DATA_FLAGS=()
+  if [ -n "${DOCKER_CACHE:-}" ]; then
+    # SHA-256 (cut to 16 hex chars) so distinct projects can't share a cache; sha256sum on Linux,
+    # shasum on macOS.
+    # pwd -P: the same project reached via a symlink must map to the same cache.
+    # The sidecar's uid and gid are part of the hash: the volume is owned by them, and a sidecar with other ids
+    # (the derived image, or the stock image's 1000:1000) could not use it. DIND_UID and DIND_GID are set only
+    # for the derived image.
+    _hash="$({ pwd -P; echo "${DIND_UID:-1000}:${DIND_GID:-1000}"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)"
+    [[ "$_hash" =~ ^[0-9a-f]{16}$ ]] || die "Could not hash the project path (need sha256sum or shasum)."
+    DIND_CACHE_VOL="agent-pod-docker-$_hash"
+    # A fixed sidecar name is the exclusive reservation: Docker refuses a second container with the
+    # same name atomically, so two sessions can't run dockerd on the same data directory.
+    DIND_NAME="agent-pod-dind-cache-$_hash"
+    mkdir -p "$STATE_DIR"; touch "$STATE_DIR/$DIND_CACHE_VOL"
+    prune_dind_caches
+    DIND_CACHE_REUSED=
+    docker volume inspect "$DIND_CACHE_VOL" >/dev/null 2>&1 && DIND_CACHE_REUSED=1
+    DIND_DATA_FLAGS=(-v "$DIND_CACHE_VOL:/home/rootless/.local/share/docker")
+  fi
+  # No --rm: a sidecar that dies during startup must still exist so its logs can be shown below;
+  # cleanup_dind removes it. --init: the image's entrypoint is a shell that runs as PID 1 and generates the
+  # TLS certificates before it execs dockerd; a PID 1 without a handler ignores SIGTERM, so an abort during
+  # startup would wait out the whole 10s stop timeout (exit 137). With tini as PID 1 the shell stops at once;
+  # after the exec, dockerd gets the signal and shuts down gracefully as before.
+  docker run -d --privileged --init \
+    --name "$DIND_NAME" --label "agent-pod.run=$RUN_ID" --network "$DIND_NET" --network-alias dind \
+    --pids-limit="${PIDS:-4096}" \
+    ${MEMORY:+--memory="$MEMORY"} ${CPUS:+--cpus="$CPUS"} \
+    -e DOCKER_TLS_CERTDIR=/certs \
+    -e DOCKER_TLS_SAN=DNS:dind \
+    -v "$DIND_CERTS:/certs" \
+    ${DIND_DATA_FLAGS[@]+"${DIND_DATA_FLAGS[@]}"} \
+    -v "$PWD:$PWD" \
+    "$DIND_IMAGE" >/dev/null \
+    || die "Could not start the Docker sidecar ($DIND_IMAGE).${DOCKER_CACHE:+ If the cache is in use by another session, close that one; a leftover from a killed session: docker rm -f $DIND_NAME}"
+  printf '%s●%s Starting Docker sidecar...\n' "$BOLD" "$RESET" >&2
+  for _i in $(seq 1 60); do
+    docker exec -e DOCKER_HOST=tcp://localhost:2376 -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client \
+      "$DIND_NAME" docker info >/dev/null 2>&1 && break
+    # An exited sidecar will never become ready: report right away instead of after the full 60s.
+    if [ "$(docker inspect -f '{{.State.Running}}' "$DIND_NAME" 2>/dev/null)" != true ]; then
+      sidecar_failed "Docker sidecar exited during startup."
+    fi
+    [ "$_i" = 60 ] && sidecar_failed "Docker sidecar did not become ready."
+    sleep 1
+  done
+  if [ -n "${DOCKER_CACHE:-}" ]; then
+    if [ -n "$DIND_CACHE_REUSED" ]; then
+      # "Images|<count>|<size>" from the sidecar's own daemon
+      _stats="$(docker exec -e DOCKER_HOST=tcp://localhost:2376 -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client \
+        "$DIND_NAME" docker system df --format '{{.Type}}|{{.TotalCount}}|{{.Size}}' 2>/dev/null \
+        | sed -n 's/^Images|\([0-9]*\)|\(.*\)$/\1 images, \2/p' || true)"
+      printf '%s●%s Docker cache: reusing %s%s\n' "$BOLD" "$RESET" "$DIND_CACHE_VOL" "${_stats:+ ($_stats)}" >&2
+    else
+      printf '%s●%s Docker cache: created new %s (empty, filled during this session)\n' "$BOLD" "$RESET" "$DIND_CACHE_VOL" >&2
+    fi
+  fi
+  DOCKER_FLAGS+=("--network=$DIND_NET" "-v" "$DIND_CERTS:/certs:ro" \
+    "-e" "DOCKER_HOST=tcp://dind:2376" "-e" "DOCKER_TLS_VERIFY=1" "-e" "DOCKER_CERT_PATH=/certs/client")
+fi
+
+# Hardening:
+#   --cap-drop=ALL                       Drop all Linux capabilities. An interactive dev shell
+#                                        as an unprivileged user needs none; this closes off
+#                                        capability-based escalation paths (CAP_NET_RAW, etc.)
+#                                        and shrinks the surface for known container-escape CVEs.
+#   --security-opt=no-new-privileges     Set NO_NEW_PRIVS on the process tree. Even if a setuid
+#                                        binary in the image (passwd, su, mount, ...) ever has
+#                                        a local-root vulnerability, it cannot elevate.
+#
+# COLORTERM is forwarded so the agent's TUI can emit full 24-bit color when the host terminal
+# supports it. Bare `-e COLORTERM` (no value) passes the host's setting through — "truecolor" on
+# iTerm2, VS Code, WezTerm, etc., or nothing when the host doesn't advertise it, so a non-truecolor
+# terminal is never forced into colors it can't render. Without this, docker leaves the container at
+# TERM=xterm with no COLORTERM and supports-color downshifts the whole UI to 16 colors.
+#
+# A_NOUPDATE turns off the agent's built-in self-updater (DISABLE_AUTOUPDATER=1 for Claude Code,
+# COPILOT_AUTO_UPDATE=false for Copilot CLI). Inside the container it can't work (the unprivileged runtime user has
+# no write access to the root-owned npm prefix, so it only prints "Auto-update failed"), and updates are handled by
+# rebuilding the image instead: the start-up check above for the default channel, or install.sh for a pinned version.
+#
+# A_FORWARD (Copilot CLI: COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN) are forwarded only when set on the host (bare
+# -e), for token-based login instead of the interactive /login. They take precedence over stored credentials, and
+# they also authenticate `gh` inside the container.
+#
+# Interactive Bash (the default command) ignores SIGTERM even under --init, so `docker stop` would wait
+# out the 10s grace period and end in exit 137. SIGHUP makes it exit at once (status 129). Only the
+# default shell (no command, or a plain `bash`) gets it: other commands, including `bash -c ...`, keep the
+# image's stop signal (SIGTERM).
+STOP_FLAGS=()
+if [ -n "${DOCKER:-}" ] && { [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; }; then
+  STOP_FLAGS=(--stop-signal=SIGHUP)
+fi
+AGENT_ENV=(-e "$A_NOUPDATE")
+for _v in $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
+RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
+  ${DOCKER:+--name "$POD_NAME"} \
+  ${DOCKER:+--init} \
+  ${STOP_FLAGS[@]+"${STOP_FLAGS[@]}"} \
+  --cap-drop=ALL \
+  --security-opt=no-new-privileges \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/home/agent-pod \
+  -e COLORTERM \
+  "${AGENT_ENV[@]}" \
+  -v "$PWD:$PWD" \
+  -w "$PWD" \
+  -v "$A_STATE_DIR:/home/agent-pod/$A_CFG_DIR" \
+  -v "$A_STATE_DIR/$A_CFG_FILE:/home/agent-pod/$A_CFG_FILE" \
+  "$IMAGE" "$@")
+
+# Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay
+# alive to clean up on exit, so the pod runs in the background (stdin handed over explicitly, since a
+# non-interactive shell would otherwise give it /dev/null) and we poll for its end. On
+# SIGTERM/SIGINT/SIGHUP the pod is stopped first (or, if it doesn't exist yet, the docker client is
+# ended), so the cleanup afterwards isn't racing a pod that still uses the network. The pod's own exit
+# code is kept. The pod gets --init (tini as PID 1) so it actually reacts to that stop signal; a bare
+# shell or node as PID 1 ignores SIGTERM and would only die after the 10s grace period (exit 137).
+if [ -z "${DOCKER:-}" ]; then
+  exec "${RUN_CMD[@]}"
+fi
+POD_PID=; STOP_REQUESTED=; POD_SEEN=; POD_GONE=; POD_KILLED=
+# A stop request is remembered and re-applied by the loop below until the pod is gone: before POD_PID is
+# known there is nothing to stop yet, and `docker stop` on a created-but-not-started container succeeds
+# without effect, after which the pod would start anyway. Once the container has been stopped (and removed
+# by --rm) its client may still be writing the pod's output: it is then left alone, because signalling it
+# again cuts that output and, from the third signal on, makes it exit 1 instead of with the pod's status.
+# The same holds if the pod ended by itself before the first stop request (never seen by a successful stop):
+# the client is signalled at most once, which is enough for a container that does not exist yet.
+stop_pod() {
+  STOP_REQUESTED=1
+  [ -z "$POD_GONE" ] || return 0
+  if _out="$(docker stop -t 10 "$POD_NAME" 2>&1)"; then POD_SEEN=1
+  elif ! grep -qi 'no such container' <<<"$_out"; then :   # any other error (daemon busy, ...) is retried, not taken as "gone"
+  elif [ -n "$POD_SEEN" ]; then POD_GONE=1
+  elif [ -n "$POD_PID" ] && [ -z "$POD_KILLED" ]; then POD_KILLED=1; kill "$POD_PID" 2>/dev/null   # no container yet: end the client
+  fi
+  return 0
+}
+trap stop_pod TERM INT HUP
+set +e
+"${RUN_CMD[@]}" <&0 &
+POD_PID=$!
+while kill -0 "$POD_PID" 2>/dev/null; do
+  [ -z "$STOP_REQUESTED" ] || stop_pod
+  sleep 0.2
+done
+wait "$POD_PID"
+exit $?

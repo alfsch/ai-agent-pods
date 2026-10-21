@@ -1,0 +1,59 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "forkProcessing": "enabled",
+  "customManagers": [
+    {
+      "description": "Keep the node base image literal in uninstall.sh and the README in sync with the Dockerfile",
+      "customType": "regex",
+      "managerFilePatterns": ["/^uninstall\\.sh$/", "/^README\\.md$/"],
+      "matchStrings": ["node:(?<currentValue>\\d[\\w.]*-slim)"],
+      "depNameTemplate": "node",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "description": "Keep the digest-pinned DIND sidecar image literal in the launcher current",
+      "customType": "regex",
+      "managerFilePatterns": ["/^agent-pod$/"],
+      "matchStrings": ["(?<depName>docker):(?<currentValue>[\\w.-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Bump the node base image everywhere in one PR",
+      "matchDepNames": ["node"],
+      "matchDatasources": ["docker"],
+      "groupName": "node base image"
+    },
+    {
+      "description": "Pin yq's image digest (the Dockerfile COPYs the binary out of it); Renovate updates tag and digest together",
+      "matchDepNames": ["mikefarah/yq"],
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "description": "Pin the digests of the docker CLI and DIND sidecar images",
+      "matchDepNames": ["docker"],
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
+      "description": "Merge updates of the tooling images (docker CLI, DIND sidecar, node base image, yq), majors included, once the required stub-tests and integration-tests checks pass; the integration tests are what vouches for them. No minimumReleaseAge: Renovate has no release timestamps for these docker updates, and with timestamp-required it would hold them back forever",
+      "matchDatasources": ["docker"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    },
+    {
+      "description": "Merge GitHub Actions updates once the required stub-tests check passes, but not before a release is 3 days old; main only accepts squash merges",
+      "matchManagers": ["github-actions"],
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash"
+    }
+  ]
+}
