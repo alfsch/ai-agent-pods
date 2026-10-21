@@ -2,8 +2,9 @@
 # (tag: a hash of this file and pod-environment.md, see `install.sh --base-hash`) or, when that fails or
 # AGENT_POD_BUILD_BASE=1, builds it from this file. It never contains an agent: the agents are proprietary and are
 # installed by each user's own build (see Dockerfile).
-# If you bump this tag, also update the literal in uninstall.sh and the README.
-FROM node:24-slim
+# Pinned by digest and kept current by Renovate (see renovate.json), which also updates the tag literals in uninstall.sh
+# and the README; if you bump the tag by hand, update those too.
+FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 
 # git/curl/less are baseline dev tools; jq and gh are reached for by the agents' built-in workflows
 # (JSON pipelines and the GitHub CLI for PRs/issues/releases). ca-certificates is needed for HTTPS.
