@@ -36,6 +36,7 @@ AGENT="${AGENT-claude}"
 #   STUB_STOP_ERROR_AT=N  the Nth `docker stop` of the pod fails with an error other than "No such container"
 #   STUB_CHANNEL / STUB_VERSION   the agent-pod.channel / agent-pod.version labels of the image;
 #                         STUB_VERSION_OUT is what `<agent> --version` prints in it
+#   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
 cat >"$BIN/docker" <<'STUB'
@@ -77,6 +78,7 @@ case "$1" in
       fi
       : > "$STUB_DIR/sidecar"; echo sidecarid; exit 0
     fi
+    [ -z "${STUB_POD_STDIN:-}" ] || cat > "$STUB_DIR/pod-stdin"   # what the pod receives on stdin
     if [ -n "${STUB_POD_SLEEP:-}${STUB_POD_DRAIN:-}" ]; then
       : > "$STUB_DIR/pod-created"; sleep "${STUB_POD_CREATE_DELAY:-0}"
       sleep "${STUB_POD_SLEEP:-$STUB_POD_DRAIN}" & s=$!
@@ -522,31 +524,41 @@ test_config_file_outside_state_dir() {   # the config file is host-owned, in the
 
 test_update_check() {   # a newer release on the image's channel rebuilds it; the opt-outs skip that, each for its own agent
   local a d v
-  upd() {   # upd <agent> <label version> <VAR=value>... : prints "update" when install.sh was run
+  upd() {   # upd <agent> <label version> <VAR=value>... : sets UPD=update when install.sh was run, else UPD=no
+    # (not printed and captured: a fail() inside $(...) would only end that subshell and the check would still pass)
     setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
     printf '%s\n' '#!/usr/bin/env bash' 'echo "install.sh $*" >> "$STUB_LOG"' > "$d/install.sh"; chmod +x "$d/install.sh"
     local a="$1" v="$2" ch=latest; shift 2; [ "$a" = claude ] || [ "$a" = copilot ] || return 1
     [ "$a" = claude ] && ch=stable
     AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= STUB_CHANNEL=$ch STUB_VERSION="$v" "$@" -- true
     [ "$RC" = 0 ] || fail "launcher exit $RC"
-    grep -q "^install.sh $a\$" "$STUB_LOG" && echo update
+    if grep -q "^install.sh $a\$" "$STUB_LOG"; then UPD=update; else UPD=no; fi
   }
   for a in claude copilot; do
-    [ "$(upd $a 1.0.0)" = update ] || fail "$a: an outdated image was not updated"
-    [ "$(upd $a 9.9.9)" != update ] || fail "$a: an image at the newest version was rebuilt"
-    [ "$(upd $a 1.0.0 AGENT_POD_NO_UPDATE=1)" != update ] || fail "$a: AGENT_POD_NO_UPDATE did not skip the update"
+    upd $a 1.0.0; [ "$UPD" = update ] || fail "$a: an outdated image was not updated"
+    upd $a 9.9.9; [ "$UPD" != update ] || fail "$a: an image at the newest version was rebuilt"
+    upd $a 1.0.0 AGENT_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "$a: AGENT_POD_NO_UPDATE did not skip the update"
   done
   # the old variable of one agent says nothing about the other
-  [ "$(upd claude 1.0.0 CLAUDE_POD_NO_UPDATE=1)" != update ] || fail "CLAUDE_POD_NO_UPDATE did not skip Claude"
-  [ "$(upd copilot 1.0.0 COPILOT_POD_NO_UPDATE=1)" != update ] || fail "COPILOT_POD_NO_UPDATE did not skip Copilot"
-  [ "$(upd copilot 1.0.0 CLAUDE_POD_NO_UPDATE=1)" = update ] || fail "CLAUDE_POD_NO_UPDATE skipped the update of Copilot"
-  [ "$(upd claude 1.0.0 COPILOT_POD_NO_UPDATE=1)" = update ] || fail "COPILOT_POD_NO_UPDATE skipped the update of Claude"
+  upd claude 1.0.0 CLAUDE_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "CLAUDE_POD_NO_UPDATE did not skip Claude"
+  upd copilot 1.0.0 COPILOT_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "COPILOT_POD_NO_UPDATE did not skip Copilot"
+  upd copilot 1.0.0 CLAUDE_POD_NO_UPDATE=1; [ "$UPD" = update ] || fail "CLAUDE_POD_NO_UPDATE skipped the update of Copilot"
+  upd claude 1.0.0 COPILOT_POD_NO_UPDATE=1; [ "$UPD" = update ] || fail "COPILOT_POD_NO_UPDATE skipped the update of Claude"
   # an image built while npm was unreachable has the tag as its version label: the real version comes from the image,
   # whatever text surrounds the number
   for v in "GitHub Copilot CLI 9.9.9." "9.9.9 (Claude Code)"; do
-    [ "$(upd copilot latest STUB_VERSION_OUT="$v")" != update ] || fail "'$v' was not recognised as the newest version"
+    upd copilot latest STUB_VERSION_OUT="$v"; [ "$UPD" != update ] || fail "'$v' was not recognised as the newest version"
   done
-  [ "$(upd copilot latest STUB_VERSION_OUT="GitHub Copilot CLI 1.0.1.")" = update ] || fail "an outdated image with a tag label was not updated"
+  upd copilot latest STUB_VERSION_OUT="GitHub Copilot CLI 1.0.1."; [ "$UPD" = update ] || fail "an outdated image with a tag label was not updated"
+}
+
+test_stdin_reaches_pod() {   # piped input arrives in the pod, also from the background job of the DOCKER=1 path
+  local c
+  for c in "" "DOCKER=1"; do
+    setup_case
+    printf 'hello\n' | launch_env env $c STUB_POD_STDIN=1 timeout 60 "$LAUNCHER" "$AGENT" true >"$CASE/out" 2>"$CASE/err"
+    [ "$(cat "$STUB_DIR/pod-stdin" 2>/dev/null)" = hello ] || fail "the pod did not receive the piped input ($c)"
+  done
 }
 
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
@@ -554,7 +566,8 @@ mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the
   local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
-  printf '%s' "${src/"$old"/$new}" > "$T/mutant"; chmod +x "$T/mutant"
+  # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
+  printf '%s' "${src/"$old"/"$new"}" > "$T/mutant"; chmod +x "$T/mutant"
   if ( LAUNCHER="$T/mutant" "$0" --inner "$test" >/dev/null 2>&1 ); then
     echo "  SURVIVED  $test passes without: ${old%%$'\n'*}"; return 1
   fi
@@ -614,6 +627,7 @@ run_mutants() {
   mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
+  mutate test_stdin_reaches_pod '"${RUN_CMD[@]}" <&0 &' '"${RUN_CMD[@]}" &' || rc=1
   return $rc
 }
 

@@ -277,7 +277,7 @@ prune_dind_caches() {
 # Show the sidecar's last log lines and, for the known host-side cause, how to fix it.
 sidecar_failed() {
   local logs
-  logs="$(docker logs "$DIND_NAME" 2>&1 | tail -n 20)"
+  logs="$(docker logs "$DIND_NAME" 2>&1 | tail -n 20 || true)"
   printf '%s\n' "$logs" >&2
   if grep -qi 'rootlesskit.*operation not permitted' <<<"$logs"; then
     err "Rootless Docker needs unprivileged user namespaces. On Ubuntu 24.04+ AppArmor restricts them (kernel.apparmor_restrict_unprivileged_userns=1); see 'Requirements for DOCKER=1' in the README."
@@ -359,7 +359,7 @@ EOF
     # The sidecar's uid and gid are part of the hash: the volume is owned by them, and a sidecar with other ids
     # (the derived image, or the stock image's 1000:1000) could not use it. DIND_UID and DIND_GID are set only
     # for the derived image.
-    _hash="$({ pwd -P; echo "${DIND_UID:-1000}:${DIND_GID:-1000}"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)"
+    _hash="$({ pwd -P; echo "${DIND_UID:-1000}:${DIND_GID:-1000}"; } | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16 || true)"
     [[ "$_hash" =~ ^[0-9a-f]{16}$ ]] || die "Could not hash the project path (need sha256sum or shasum)."
     DIND_CACHE_VOL="agent-pod-docker-$_hash"
     # A fixed sidecar name is the exclusive reservation: Docker refuses a second container with the
