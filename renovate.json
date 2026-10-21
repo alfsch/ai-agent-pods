@@ -2,7 +2,6 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "forkProcessing": "enabled",
-  "timezone": "Europe/Berlin",
   "customManagers": [
     {
       "description": "Keep the node base image literal in uninstall.sh and the README in sync with Dockerfile.base",
@@ -24,11 +23,10 @@
   ],
   "packageRules": [
     {
-      "description": "Bump the node base image everywhere in one PR, at most once a week (Monday before 06:00 Berlin time). Every bump changes the hash that tags the published base image and makes every image rebuild on its next start, and node:24-slim itself is republished several times a month",
+      "description": "Bump the node base image everywhere in one PR",
       "matchDepNames": ["node"],
       "matchDatasources": ["docker"],
-      "groupName": "node base image",
-      "schedule": ["before 6am on monday"]
+      "groupName": "node base image"
     },
     {
       "description": "Pin the node base image of Dockerfile.base by digest: a tag like 24-slim is republished under the same name, so without the digest Renovate would never see those rebuilds. Only the Dockerfile; the tag literals in uninstall.sh and the README stay plain tags",
