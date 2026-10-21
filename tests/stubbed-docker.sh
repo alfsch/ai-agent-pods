@@ -34,6 +34,8 @@ AGENT="${AGENT-claude}"
 #                         the client keeps writing for N seconds; like Docker's client it survives two signals
 #                         and exits 1 on the third (client-killed)
 #   STUB_STOP_ERROR_AT=N  the Nth `docker stop` of the pod fails with an error other than "No such container"
+#   STUB_CHANNEL / STUB_VERSION   the agent-pod.channel / agent-pod.version labels of the image;
+#                         STUB_VERSION_OUT is what `<agent> --version` prints in it
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
 cat >"$BIN/docker" <<'STUB'
@@ -42,6 +44,11 @@ echo "$*" >> "$STUB_LOG"
 case "$1" in
   info) exit 0 ;;
   image)
+    # image labels, for the update check
+    if [ "$2" = inspect ]; then
+      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; esac
+      exit 0
+    fi
     if [[ "$*" == *agent-pod-dind* ]]; then
       { [ -n "${STUB_DERIVED_EXISTS:-}" ] || [ -e "$STUB_DIR/built" ]; } && echo derivedid; exit 0
     fi
@@ -62,6 +69,8 @@ case "$1" in
     esac
     exit 0 ;;
   run)
+    # `<agent> --version` inside the image (the launcher reads the installed version from it)
+    case "$*" in *" --version") echo "${STUB_VERSION_OUT:-}"; exit 0 ;; esac
     if [ "$2" = -d ]; then
       if [ -n "${STUB_NAME_CONFLICT:-}" ]; then
         echo 'docker: Error response from daemon: Conflict. The container name is already in use.' >&2; exit 125
@@ -122,7 +131,12 @@ cat >"$BIN/uname" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in -s) echo "${STUB_UNAME:-Linux}" ;; *) exec /usr/bin/uname "$@" ;; esac
 STUB
-chmod +x "$BIN/id" "$BIN/uname"
+# the npm registry: both channels are at 9.9.9
+cat >"$BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+echo '{"latest":"9.9.9","stable":"9.9.9"}'
+STUB
+chmod +x "$BIN/id" "$BIN/uname" "$BIN/curl"
 # macOS has no timeout(1): a stand-in with its contract (the command's status, 124 when it ran out of time).
 # It is always written (test_timeout_standin tests it on every platform) and used where timeout(1) is missing;
 # STUB_TIMEOUT_STANDIN=1 uses it even where timeout exists.
@@ -506,6 +520,35 @@ test_config_file_outside_state_dir() {   # the config file is host-owned, in the
   [ "$(cat "$f")" = '{"new":1}' ] || fail "an existing config was overwritten"
 }
 
+test_update_check() {   # a newer release on the image's channel rebuilds it; the opt-outs skip that, each for its own agent
+  local a d v
+  upd() {   # upd <agent> <label version> <VAR=value>... : prints "update" when install.sh was run
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "install.sh $*" >> "$STUB_LOG"' > "$d/install.sh"; chmod +x "$d/install.sh"
+    local a="$1" v="$2" ch=latest; shift 2; [ "$a" = claude ] || [ "$a" = copilot ] || return 1
+    [ "$a" = claude ] && ch=stable
+    AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= STUB_CHANNEL=$ch STUB_VERSION="$v" "$@" -- true
+    [ "$RC" = 0 ] || fail "launcher exit $RC"
+    grep -q "^install.sh $a\$" "$STUB_LOG" && echo update
+  }
+  for a in claude copilot; do
+    [ "$(upd $a 1.0.0)" = update ] || fail "$a: an outdated image was not updated"
+    [ "$(upd $a 9.9.9)" != update ] || fail "$a: an image at the newest version was rebuilt"
+    [ "$(upd $a 1.0.0 AGENT_POD_NO_UPDATE=1)" != update ] || fail "$a: AGENT_POD_NO_UPDATE did not skip the update"
+  done
+  # the old variable of one agent says nothing about the other
+  [ "$(upd claude 1.0.0 CLAUDE_POD_NO_UPDATE=1)" != update ] || fail "CLAUDE_POD_NO_UPDATE did not skip Claude"
+  [ "$(upd copilot 1.0.0 COPILOT_POD_NO_UPDATE=1)" != update ] || fail "COPILOT_POD_NO_UPDATE did not skip Copilot"
+  [ "$(upd copilot 1.0.0 CLAUDE_POD_NO_UPDATE=1)" = update ] || fail "CLAUDE_POD_NO_UPDATE skipped the update of Copilot"
+  [ "$(upd claude 1.0.0 COPILOT_POD_NO_UPDATE=1)" = update ] || fail "COPILOT_POD_NO_UPDATE skipped the update of Claude"
+  # an image built while npm was unreachable has the tag as its version label: the real version comes from the image,
+  # whatever text surrounds the number
+  for v in "GitHub Copilot CLI 9.9.9." "9.9.9 (Claude Code)"; do
+    [ "$(upd copilot latest STUB_VERSION_OUT="$v")" != update ] || fail "'$v' was not recognised as the newest version"
+  done
+  [ "$(upd copilot latest STUB_VERSION_OUT="GitHub Copilot CLI 1.0.1.")" = update ] || fail "an outdated image with a tag label was not updated"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the launcher)
   local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
@@ -568,6 +611,9 @@ run_mutants() {
   mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
   mutate test_config_file_outside_state_dir ' && [ ! -L "$A_STATE_DIR/$A_CFG_FILE" ]; then' '; then' || rc=1
   mutate test_config_file_outside_state_dir 'if [ ! -e "$A_CFG_PATH" ] && ' 'if ' || rc=1
+  mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
+  mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
+  mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
   return $rc
 }
 

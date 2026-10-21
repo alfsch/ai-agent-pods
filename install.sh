@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail   # -E: the ERR trap below also fires inside install_agent
 
 # ANSI color codes; auto-disabled when stdout isn't a TTY (e.g. piped to a logfile, run in CI).
 BOLD=$'\e[1m'; BLUE=$'\e[34m'; GREEN=$'\e[32m'; RED=$'\e[31m'; DIM=$'\e[2m'; RESET=$'\e[0m'

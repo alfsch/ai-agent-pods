@@ -61,6 +61,7 @@ fi
 #   A_NAME / A_BIN         what to call it, and its command inside the image
 #   A_PKG / A_CHANNEL      its npm package, and the dist-tag that install.sh and the start-up check follow
 #   A_VERSION_VAR          the variable that pins a version for install.sh
+#   A_LEGACY_NO_UPDATE     the update opt-out of the single-agent tool, still honoured for this agent only
 #   A_STATE_DIR            host-side state (login, history), kept at the names the single-agent tools used, so that
 #                          existing logins keep working
 #   A_CFG_DIR / A_CFG_FILE where the agent reads its state in HOME, and its main config file (a sibling of that dir)
@@ -69,14 +70,14 @@ fi
 case "$AGENT" in
   claude)
     A_NAME="Claude Code"; A_BIN=claude; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
-    A_VERSION_VAR=CLAUDE_CODE_VERSION
+    A_VERSION_VAR=CLAUDE_CODE_VERSION; A_LEGACY_NO_UPDATE=CLAUDE_POD_NO_UPDATE
     A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json
     A_NOUPDATE=DISABLE_AUTOUPDATER=1
     A_FORWARD=
     ;;
   copilot)
     A_NAME="Copilot CLI"; A_BIN=copilot; A_PKG=@github/copilot; A_CHANNEL=latest
-    A_VERSION_VAR=COPILOT_CLI_VERSION
+    A_VERSION_VAR=COPILOT_CLI_VERSION; A_LEGACY_NO_UPDATE=COPILOT_POD_NO_UPDATE
     A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json
     A_NOUPDATE=COPILOT_AUTO_UPDATE=false
     A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"
@@ -102,9 +103,9 @@ fi
 # and npm's current version on that channel differs from what's installed, rebuild via install.sh before launching.
 # Images pinned to a version are left alone, as are images built before the labels existed. The check is
 # best-effort: a slow/offline registry (3s cap) or a failed rebuild only prints a note and continues with the
-# existing image. Set AGENT_POD_NO_UPDATE=1 to skip it (CLAUDE_POD_NO_UPDATE and COPILOT_POD_NO_UPDATE still work).
+# existing image. Set AGENT_POD_NO_UPDATE=1 to skip it (the old CLAUDE_POD_NO_UPDATE and COPILOT_POD_NO_UPDATE still work, each for its own agent).
 # Output goes to stderr so piped stdout stays clean.
-if [ -z "${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}" ] && command -v curl >/dev/null; then
+if [ -z "${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}" ] && command -v curl >/dev/null; then
   # Inspect by image ID (found via `image ls -q`, like the preflight above), not by name — see the
   # Docker Desktop note there. A failed lookup leaves the labels empty, which just skips the update.
   _image_id="$(docker image ls -q "$IMAGE" 2>/dev/null | head -n1 || true)"
@@ -112,9 +113,10 @@ if [ -z "${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:
   if [ "$(_label agent-pod.channel)" = "$A_CHANNEL" ]; then
     _installed="$(_label agent-pod.version)"
     # If install.sh couldn't resolve the channel at build time, the label holds the literal tag; ask the
-    # image for the real version so an up-to-date image isn't needlessly rebuilt.
+    # image for the real version so an up-to-date image isn't needlessly rebuilt. The output may carry text around
+    # the number ("GitHub Copilot CLI 1.0.101.", "2.1.304 (Claude Code)"), so take the first x.y.z in it.
     if [[ ! "$_installed" =~ ^[0-9] ]]; then
-      _installed="$(docker run --rm "$IMAGE" "$A_BIN" --version 2>/dev/null | sed -n 's/^\([0-9][0-9.]*\).*/\1/p' || true)"
+      _installed="$(docker run --rm "$IMAGE" "$A_BIN" --version 2>/dev/null | grep -oE -m1 '[0-9]+\.[0-9]+\.[0-9]+' || true)"
     fi
     _newest="$(curl -fsSL --max-time 3 "https://registry.npmjs.org/-/package/$A_PKG/dist-tags" 2>/dev/null \
       | sed -n "s/.*\"$A_CHANNEL\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
