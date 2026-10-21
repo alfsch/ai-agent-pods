@@ -10,6 +10,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
+INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
 
@@ -593,14 +594,30 @@ test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash
   [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "rebuilt twice: once for the repository, once for a release"
 }
 
+test_build_hash() {   # the hash install.sh stores in the image changes with each of its inputs and with nothing else
+  local d h0 h1 h2 h
+  setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'a\n' > "$d/pod-environment.md"
+  h0="$("$d/install.sh" --build-hash)" || fail "--build-hash failed"
+  [[ "$h0" =~ ^[0-9a-f]{16}$ ]] || fail "not 16 hex characters: '$h0'"
+  [ "$("$d/install.sh" --build-hash)" = "$h0" ] || fail "the hash is not stable for the same inputs"
+  printf 'FROM y\n' > "$d/Dockerfile"; h1="$("$d/install.sh" --build-hash)"
+  [ -n "$h1" ] && [ "$h1" != "$h0" ] || fail "a changed Dockerfile did not change the hash"
+  printf 'FROM x\n' > "$d/Dockerfile"; printf 'b\n' > "$d/pod-environment.md"; h2="$("$d/install.sh" --build-hash)"
+  [ -n "$h2" ] && [ "$h2" != "$h0" ] && [ "$h2" != "$h1" ] || fail "a changed pod-environment.md did not change the hash"
+  printf 'a\n' > "$d/pod-environment.md"; h="$("$d/install.sh" --build-hash)"
+  [ "$h" = "$h0" ] || fail "restoring the inputs did not restore the hash"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
-mutate() {   # mutate <test> <old> <new>   (literal replacement in a copy of the launcher)
-  local test="$1" old="$2" new="$3" src; src="$(cat "$ROOT/agent-pod"; echo x)"; src="${src%x}"
+mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
+  local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
+  [ "$file" != install.sh ] || var=INSTALLER
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
   printf '%s' "${src/"$old"/"$new"}" > "$T/mutant"; chmod +x "$T/mutant"
-  if ( LAUNCHER="$T/mutant" "$0" --inner "$test" >/dev/null 2>&1 ); then
+  if ( export "$var=$T/mutant"; "$0" --inner "$test" >/dev/null 2>&1 ); then
     echo "  SURVIVED  $test passes without: ${old%%$'\n'*}"; return 1
   fi
   echo "  killed    $test fails without: ${old%%$'\n'*}"
@@ -663,6 +680,9 @@ run_mutants() {
   mutate test_rebuild_on_repo_change '"$A_VERSION_VAR=${_asked:-$A_CHANNEL}"' '"$A_VERSION_VAR=$A_CHANNEL"' || rc=1
   mutate test_rebuild_on_repo_change 'if [ -z "$_tried" ] && command -v curl' 'if command -v curl' || rc=1
   mutate test_rebuild_on_repo_change '_tried=1   # whatever the outcome' ': # whatever the outcome' || rc=1
+  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/Dockerfile"' install.sh || rc=1
+  mutate test_build_hash '"$REPO_DIR/Dockerfile" "$REPO_DIR/pod-environment.md"' '"$REPO_DIR/pod-environment.md"' install.sh || rc=1
+  mutate test_build_hash '| cut -c1-16' "| cut -c1-16 | sed 's/.*/0123456789abcdef/'" install.sh || rc=1
   return $rc
 }
 
