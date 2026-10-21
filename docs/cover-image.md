@@ -1,7 +1,7 @@
 # Cover image
 
-The cover image `assets/cover.webp` was made with Bing Image Creator from the prompt below, which also makes it
-reproducible or changeable. The picture of copilot-pod was made the same way.
+The cover image `assets/cover.webp` was made with Bing Image Creator from an earlier version of the prompt below
+(plain round eyes); the prompt now asks for friendlier eyes and has not produced a picture yet. The picture of copilot-pod was made the same way.
 
 Reference look (copilot-pod): a black matte cylindrical base with a small light label, a clear glass dome, a glass
 sphere inside with softly glowing eyes, dark charcoal background, a soft reflective floor, studio product shot.
@@ -11,7 +11,9 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
 > Studio product photograph of two identical minimalist desk gadgets side by side on a dark reflective surface, dark
 > charcoal background with soft vignette. Each gadget has a black matte cylindrical base and a tall clear glass dome.
 > Inside each dome floats a transparent glass sphere shaped like a head, with a delicate glowing artificial brain of
-> fine luminous circuitry and neural filaments visible inside the sphere, and two softly glowing round eyes. The left
+> fine luminous circuitry and neural filaments visible inside the sphere, and two large, soft, rounded glowing eyes with
+> a gentle highlight, slightly tilted upward at the outer corners like a friendly smile, plus a tiny curved glowing
+> smile below them, warm and approachable expression, cute and friendly character, not menacing. The left
 > gadget: eyes and brain glow warm terracotta orange (#D97757). The right gadget: eyes and brain glow violet purple
 > (#8534F3). The base of the left gadget has the small light-grey engraved text "claude-pod", the base of the right one
 > "copilot-pod". Minimal, premium, symmetrical composition, centered, soft rim lighting, shallow depth of field, 3:2
@@ -23,6 +25,9 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
   in the prompt to keep that.
 - Generators often garble text. If the labels come out wrong, generate the picture without the label text and add
   the two labels afterwards.
+- Friendlier eyes: the first picture had plain round glowing dots, which look blank. The eye description above adds
+  highlights, upturned corners and a small smile. If the eyes turn into cartoon faces over the brain, add "eyes
+  embedded in the brain, no face outline"; if the brain disappears, add "the brain stays clearly visible".
 - To make the spheres differ in shape as well, add: "left sphere with a rounder, friendlier face, right sphere with a
   more angular, technical look".
 
