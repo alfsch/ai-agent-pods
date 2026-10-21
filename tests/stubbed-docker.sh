@@ -584,6 +584,10 @@ test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash
   # a failed rebuild does not stop the start
   rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=9.9.9 STUB_INSTALL_EXIT=1; rc_is 0
   in_out 'Rebuild failed'; logged '^run --rm .*agent-pod:claude true$'
+  # ... and the release check does not repeat it, although a newer release exists (installed version is outdated)
+  rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=1.0.0 STUB_INSTALL_EXIT=1; rc_is 0
+  [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "a failed rebuild was tried a second time by the release check"
+  logged '^run --rm .*agent-pod:claude true$'
   # after a rebuild the release check does not run (it would rebuild a second time)
   rb claude STUB_BUILD=old STUB_CHANNEL=stable STUB_VERSION=1.0.0; rc_is 0
   [ "$(grep -c '^install.sh claude$' "$STUB_LOG")" = 1 ] || fail "rebuilt twice: once for the repository, once for a release"
@@ -657,8 +661,8 @@ run_mutants() {
   mutate test_stdin_reaches_pod '"${RUN_CMD[@]}" <&0 &' '"${RUN_CMD[@]}" &' || rc=1
   mutate test_rebuild_on_repo_change '"$(_label agent-pod.build)" != "$_want"' '"$(_label agent-pod.build)" = "$_want"' || rc=1
   mutate test_rebuild_on_repo_change '"$A_VERSION_VAR=${_asked:-$A_CHANNEL}"' '"$A_VERSION_VAR=$A_CHANNEL"' || rc=1
-  mutate test_rebuild_on_repo_change 'if [ -z "$_rebuilt" ] && command -v curl' 'if command -v curl' || rc=1
-  mutate test_rebuild_on_repo_change '&& _rebuilt=1 || err' '&& true || err' || rc=1
+  mutate test_rebuild_on_repo_change 'if [ -z "$_tried" ] && command -v curl' 'if command -v curl' || rc=1
+  mutate test_rebuild_on_repo_change '_tried=1   # whatever the outcome' ': # whatever the outcome' || rc=1
   return $rc
 }
 
