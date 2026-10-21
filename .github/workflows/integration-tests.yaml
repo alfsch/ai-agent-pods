@@ -1,0 +1,51 @@
+name: Integration tests
+
+# Runs tests/integration.sh against a real Docker daemon: the pod images (Claude Code and Copilot CLI) built from the Dockerfile, the pinned
+# rootless sidecar, DOCKER=1 sessions, the cache, TLS and signals. This is what tells an update of a tooling
+# image (docker CLI, DIND sidecar, node base, yq) from a broken one; the stub tests need no daemon and cannot.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request makes the older run obsolete. Every other run gets a group of its own: a group
+# keeps only one pending run and cancels older pending ones even without cancel-in-progress.
+concurrency:
+  group: integration-tests-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The rootless sidecar needs unprivileged user namespaces, which Ubuntu 24.04 restricts through AppArmor.
+      - name: Allow unprivileged user namespaces
+        run: |
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sysctl kernel.unprivileged_userns_clone user.max_user_namespaces || true
+
+      # Builds the image from the Dockerfile of this commit, so an update of the node, docker CLI or yq image is
+      # what gets tested.
+      - name: Build the image
+        run: ./install.sh
+
+      - name: Integration tests
+        run: tests/integration.sh
+
+      - name: Docker state after a failure
+        if: failure()
+        run: |
+          docker ps -a
+          docker network ls
+          docker volume ls
+          docker image ls
