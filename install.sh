@@ -83,7 +83,9 @@ build_base() {
   echo
 }
 
-# 0: the pulled base may be used. By digest when Docker knows it (the tag could move between pull and check).
+# 0: the pulled base may be used. Checked by digest when Docker knows it (the tag could move between pull and check),
+# and then BASE_IMAGE becomes that digest, so the agent images are built from the bytes that were checked and not from
+# whatever the tag points at by then (another install running at the same time can retag it).
 verify_base() {
   local ref out
   if [ "$BASE_REPO" != "$DEFAULT_BASE_REPO" ]; then
@@ -99,6 +101,7 @@ verify_base() {
   if out="$("$COSIGN" verify --certificate-oidc-issuer "$SIGNER_ISSUER" --certificate-identity-regexp "$SIGNER_IDENTITY" \
         "${ref:-$BASE_IMAGE}" 2>&1 >/dev/null)"; then
     ok "Base image signature verified"
+    [ -z "$ref" ] || BASE_IMAGE="$ref"
   else
     printf '%s  Signature check failed (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
     return 1

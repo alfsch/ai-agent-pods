@@ -668,6 +668,11 @@ test_base_signature() {   # a pulled base is verified with cosign when it is the
   logged "^cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp .*publish-base.*refs/heads/main.* $DEF:$H0\$"
   # by digest when Docker knows it
   sig STUB_REPO_DIGEST="$DEF@sha256:abc"; rc_is 0; logged " $DEF@sha256:abc\$"; not_logged "cosign .* $DEF:$H0"
+  # and the agent image is built from that digest, not from the tag that could be retargeted after the check
+  logged "^build .*--build-arg BASE_IMAGE=$DEF@sha256:abc "; not_logged "BASE_IMAGE=$DEF:$H0"
+  # without a digest (or unverified) the tag is all there is
+  sig; rc_is 0; logged "^build .*--build-arg BASE_IMAGE=$DEF:$H0 "
+  sig AGENT_POD_COSIGN=no-such-cosign-here STUB_REPO_DIGEST="$DEF@sha256:abc"; rc_is 0; logged "^build .*--build-arg BASE_IMAGE=$DEF:$H0 "
   # another repository's digest is not taken for ours
   sig STUB_REPO_DIGEST="other/repo@sha256:abc"; rc_is 0; logged "cosign .* $DEF:$H0\$"
   # a signature that does not match: the pulled image is not used, the base is built here
@@ -775,6 +780,7 @@ run_mutants() {
   mutate test_base_signature '--certificate-identity-regexp "$SIGNER_IDENTITY"' '--certificate-identity-regexp ".*"' install.sh || rc=1
   mutate test_base_signature '--certificate-oidc-issuer "$SIGNER_ISSUER"' '--certificate-oidc-issuer ""' install.sh || rc=1
   mutate test_base_signature '"${ref:-$BASE_IMAGE}"' '"$BASE_IMAGE"' install.sh || rc=1
+  mutate test_base_signature '    [ -z "$ref" ] || BASE_IMAGE="$ref"' '    :' install.sh || rc=1
   mutate test_base_signature "index(\$0, repo) == 1 { print; exit }" "{ print; exit }" install.sh || rc=1
   mutate test_base_signature '    printf '"'"'%s  Not verified: cosign is not installed (it checks that CI built this image).%s\n'"'"' "$DIM" "$RESET"
     [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return' '    return 0' install.sh || rc=1

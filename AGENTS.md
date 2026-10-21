@@ -76,7 +76,9 @@ test that fails without it.
   installed; a failed check builds the base locally instead of using the pulled image, a missing cosign only warns
   (Docker stays the one requirement) unless `AGENT_POD_REQUIRE_SIGNED_BASE=1`. The signer identity in `install.sh`
   (`SIGNER_IDENTITY`) names the workflow file and `refs/heads/main`: renaming the workflow means changing both, and a
-  base published from another branch is rightly rejected. Only the default repository is checked.
+  base published from another branch is rightly rejected. Only the default repository is checked. After a successful
+  check `BASE_IMAGE` is the verified digest, so the agent images are built from the bytes that were checked and not
+  from a tag that another install could retarget meanwhile.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.
