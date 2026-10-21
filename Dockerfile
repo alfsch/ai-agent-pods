@@ -18,9 +18,9 @@ COPY --from=mikefarah/yq:4.54.1@sha256:4b3d9475d65571d28cbb19544d3820ec2945e4c8b
 
 # Docker CLI (with the compose and buildx plugins) only, no daemon. Pinned by digest, kept current by Renovate. It is inert unless the launcher is run with
 # DOCKER=1, which points it at a rootless Docker-in-Docker sidecar via DOCKER_HOST.
-COPY --from=docker:29-cli@sha256:6fae2214c3121a28d5aa639d09032f61310b7c9c75ffbad1025f261a1b621800 /usr/local/bin/docker /usr/local/bin/docker
-COPY --from=docker:29-cli@sha256:6fae2214c3121a28d5aa639d09032f61310b7c9c75ffbad1025f261a1b621800 /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
-COPY --from=docker:29-cli@sha256:6fae2214c3121a28d5aa639d09032f61310b7c9c75ffbad1025f261a1b621800 /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
+COPY --from=docker:29-cli@sha256:5ebe9898293f8e1062ed0b65078c24486fb32a99dd4895d0dba0251948a7c775 /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker:29-cli@sha256:5ebe9898293f8e1062ed0b65078c24486fb32a99dd4895d0dba0251948a7c775 /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+COPY --from=docker:29-cli@sha256:5ebe9898293f8e1062ed0b65078c24486fb32a99dd4895d0dba0251948a7c775 /usr/local/libexec/docker/cli-plugins/docker-buildx /usr/local/libexec/docker/cli-plugins/docker-buildx
 
 # The agent to install: install.sh passes its npm package (AGENT_PKG), the version or dist-tag to install
 # (AGENT_VERSION) and the name (AGENT). Everything above is the same for every agent, so BuildKit shares those
