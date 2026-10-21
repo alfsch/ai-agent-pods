@@ -42,8 +42,18 @@ docker info >/dev/null 2>&1 || die "Docker daemon is not running."
 # built from (see base_hash). Each install pulls it, so a rebuild of it by CI reaches the user; if the pull fails (offline,
 # a registry rate limit) a local copy of that tag is used, and without one the base is built here. AGENT_POD_BASE_REPO
 # names another registry path (a fork), AGENT_POD_BUILD_BASE=1 always builds locally. No agent is ever published.
-BASE_REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"
+DEFAULT_BASE_REPO=ghcr.io/alfsch/agent-pod-base
+BASE_REPO="${AGENT_POD_BASE_REPO:-$DEFAULT_BASE_REPO}"
 BASE_IMAGE="$BASE_REPO:$(base_hash)"
+
+# publish-base.yaml signs the published base keylessly with cosign (Sigstore). A pulled base is verified when cosign is
+# installed: the signature must come from that workflow on main of this repository, so an image pushed by hand or by
+# another workflow is not used (the base is built here instead). Only the default repository is checked: a fork's
+# signer is not this one. AGENT_POD_REQUIRE_SIGNED_BASE=1 also refuses a pulled base that cannot be verified, for
+# lack of cosign included. AGENT_POD_COSIGN names another cosign binary. If you rename the workflow, change this.
+SIGNER_ISSUER=https://token.actions.githubusercontent.com
+SIGNER_IDENTITY='^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
+COSIGN="${AGENT_POD_COSIGN:-cosign}"
 
 # The build starts from the newest FROM image that can be pulled: a plain `docker build` would keep a local one, and
 # with it the Debian packages of the first build. A failed pull must not fail the install; a local copy is used (a
@@ -73,12 +83,42 @@ build_base() {
   echo
 }
 
+# 0: the pulled base may be used. Checked by digest when Docker knows it (the tag could move between pull and check),
+# and then BASE_IMAGE becomes that digest, so the agent images are built from the bytes that were checked and not from
+# whatever the tag points at by then (another install running at the same time can retag it).
+verify_base() {
+  local ref out
+  if [ "$BASE_REPO" != "$DEFAULT_BASE_REPO" ]; then
+    printf '%s  Not verified: %s is not the default repository.%s\n' "$DIM" "$BASE_REPO" "$RESET"
+    [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return
+  fi
+  if ! command -v "$COSIGN" >/dev/null 2>&1; then
+    printf '%s  Not verified: cosign is not installed (it checks that CI built this image).%s\n' "$DIM" "$RESET"
+    [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return
+  fi
+  ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$BASE_IMAGE" 2>/dev/null \
+    | awk -v repo="$BASE_REPO@" 'index($0, repo) == 1 { print; exit }')"
+  if out="$("$COSIGN" verify --certificate-oidc-issuer "$SIGNER_ISSUER" --certificate-identity-regexp "$SIGNER_IDENTITY" \
+        "${ref:-$BASE_IMAGE}" 2>&1 >/dev/null)"; then
+    ok "Base image signature verified"
+    [ -z "$ref" ] || BASE_IMAGE="$ref"
+  else
+    printf '%s  Signature check failed (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+    return 1
+  fi
+}
+
 ensure_base() {
   local out
   if [ -n "${AGENT_POD_BUILD_BASE:-}" ]; then build_base; return; fi
   info "Pulling the base image '$BASE_IMAGE'"
   if out="$(docker pull "$BASE_IMAGE" 2>&1)"; then
-    ok "Base image is current"; echo
+    ok "Base image is current"
+    if ! verify_base; then
+      printf '%s  Not using the pulled image; building it here.%s\n' "$DIM" "$RESET"; echo
+      build_base; return
+    fi
+    echo
   elif [ -n "$(docker image ls -q "$BASE_IMAGE" 2>/dev/null)" ]; then
     printf '%s  Could not pull it (%s); using the local copy.%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"; echo
   else
