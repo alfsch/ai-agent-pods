@@ -79,6 +79,9 @@ test that fails without it.
   base published from another branch is rightly rejected. Only the default repository is checked. After a successful
   check `BASE_IMAGE` is the verified digest, so the agent images are built from the bytes that were checked and not
   from a tag that another install could retarget meanwhile.
+  The workflow signs the digest it computed from the manifest it pushed (and checked is in the registry), never the
+  result of a later tag lookup: anything else writing to the package could have moved the tag, and the workflow would
+  sign that with its own identity.
 - The agent layer of `Dockerfile` runs `<agent> --version` and installs again (three tries) when that fails: npm can
   succeed while the agent's platform-specific optional package did not download, and the CLI then only says "no platform
   package found" when it runs (seen as a flaky integration test). Do not drop the check or the retries; `install.sh`

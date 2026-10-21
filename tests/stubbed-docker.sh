@@ -11,6 +11,7 @@ trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
+WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
@@ -42,6 +43,8 @@ AGENT="${AGENT-claude}"
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
 #   STUB_PULL_FAIL=1      `docker pull` fails like a registry rate limit
+#   STUB_INDEX_JSON=x     what `buildx imagetools create --dry-run` prints (the index to be pushed); STUB_INSPECT_FAIL=1 makes
+#                         `imagetools inspect <ref>@sha256:...` fail; looking a tag up gives a digest that is not the created one
 #   STUB_REPO_DIGEST=x    what the pulled image's RepoDigests hold (empty by default); STUB_COSIGN_FAIL=1 `cosign verify` fails
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
@@ -62,6 +65,13 @@ case "$1" in
     exit 0 ;;
   pull) [ -z "${STUB_PULL_FAIL:-}" ] || { echo 'Error response from daemon: toomanyrequests: You have reached your pull rate limit.' >&2; exit 1; }; exit 0 ;;
   build) cat > "$STUB_DIR/dockerfile"; : > "$STUB_DIR/built"; exit "${STUB_BUILD_FAIL:-0}" ;;
+  buildx)
+    case "$*" in
+      *"imagetools create --dry-run"*) printf '%s\n' "${STUB_INDEX_JSON:-}" ;;
+      *"imagetools inspect"*"@sha256:"*) exit "${STUB_INSPECT_FAIL:-0}" ;;
+      *"imagetools inspect"*) echo '{"digest":"sha256:replaced"}' ;;   # a tag: it points at something else by now
+    esac
+    exit 0 ;;
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
   volume)
     case "$2" in
@@ -724,10 +734,39 @@ test_agent_install_layer() {   # the install layer of Dockerfile runs the agent 
   [ "$(installs)" = 3 ] || fail "expected 3 installs, got $(installs)"; in_out 'Attempt 3 of installing pkg@1.2.3 failed'
 }
 
+test_publish_signs_created_digest() {   # the workflow signs the digest of the manifest it created, never what the tag points at later
+  local d create sign index want
+  step_body() {   # step_body <step name>: the run: block of that step of the workflow
+    awk -v name="$1" '
+      $0 ~ "- name: " name "$" { f = 1; next }
+      f && /^        run: \|$/ { r = 1; next }
+      f && r && /^          / { sub(/^          /, ""); print; next }
+      f && r { exit }' "$WORKFLOW"
+  }
+  create="$(step_body 'Create the multi-arch tag')"; sign="$(step_body 'Sign the image')"
+  [ -n "$create" ] && [ -n "$sign" ] || fail "the create or the sign step was not found in $WORKFLOW"
+  index='{"schemaVersion":2,"manifests":["a","b"]}'
+  want="sha256:$(printf '%s' "$index" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -d' ' -f1)"
+  run_steps() {   # run_steps <VAR=value>... : the steps as GitHub runs them (bash -e), the second one with the first one's output
+    setup_case; d="$CASE/wf"; mkdir -p "$d/digests"; : > "$d/digests/aaa"; : > "$d/digests/bbb"; : > "$d/output"
+    RC=0; env PATH="$BIN:$PATH" IMAGE=img TAG=t RUNNER_TEMP="$d" GITHUB_OUTPUT="$d/output" STUB_INDEX_JSON="$index" "$@" bash -e -c "$create" >"$CASE/out" 2>"$CASE/err" || RC=$?
+    SIGNED=; [ "$RC" != 0 ] || { DIGEST="$(sed -n 's/^digest=//p' "$d/output")"; env PATH="$BIN:$PATH" IMAGE=img DIGEST="$DIGEST" bash -e -c "$sign" >>"$CASE/out" 2>>"$CASE/err" && SIGNED=1; }
+  }
+  run_steps; rc_is 0; [ -n "$SIGNED" ] || fail "the sign step failed"
+  [ "$(cat "$d/output")" = "digest=$want" ] || fail "the digest was not the sha256 of the manifest that is pushed ($(cat "$d/output"), expected digest=$want)"
+  logged '^buildx imagetools create --dry-run -t img:t img@sha256:aaa img@sha256:bbb$'
+  order '^buildx imagetools create --dry-run' '^buildx imagetools create -t img:t img@sha256:aaa img@sha256:bbb$' "^buildx imagetools inspect img@$want\$" "^cosign sign --yes img@$want\$"
+  # the tag is not looked up (it is the one thing that can have moved), so what is signed cannot be anything else
+  not_logged 'imagetools inspect img:t'; not_logged 'sha256:replaced'
+  # the pushed manifest is not the one that was computed: nothing is signed
+  run_steps STUB_INSPECT_FAIL=1; [ "$RC" != 0 ] || fail "a digest that is not in the registry did not fail the create step"
+  [ ! -s "$d/output" ] || fail "a digest was handed on although the manifest was not in the registry"; not_logged '^cosign'
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; Dockerfile) var=DOCKERFILE ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -833,6 +872,10 @@ run_mutants() {
   mutate test_agent_install_layer $'    done; \\\n    exit 1' $'    done; \\\n    exit 0' Dockerfile || rc=1
   mutate test_agent_install_layer ' && ${AGENT} --version && exit 0;' ' && ${AGENT} --version;' Dockerfile || rc=1
   mutate test_agent_install_layer 'npm uninstall -g ${AGENT_PKG} >/dev/null 2>&1 || true;' 'true;' Dockerfile || rc=1
+  mutate test_publish_signs_created_digest '          cosign sign --yes "$IMAGE@$DIGEST"' '          cosign sign --yes "$IMAGE@$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '"'"'{{json .Manifest}}'"'"' | sed '"'"'s/.*"digest":"\([^"]*\)".*/\1/'"'"')"' .github/workflows/publish-base.yaml || rc=1
+  mutate test_publish_signs_created_digest "digest=\"sha256:\$(printf '%s' \"\$manifest\"" "digest=\"sha256:\$(printf '%s' \"\$sources\"" .github/workflows/publish-base.yaml || rc=1
+  mutate test_publish_signs_created_digest '          docker buildx imagetools inspect "$IMAGE@$digest"' '          true' .github/workflows/publish-base.yaml || rc=1
+  mutate test_publish_signs_created_digest '          echo "digest=$digest" >> "$GITHUB_OUTPUT"' '          true' .github/workflows/publish-base.yaml || rc=1
   return $rc
 }
 
