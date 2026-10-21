@@ -160,6 +160,9 @@ echo "cosign $*" >> "$STUB_LOG"
 [ -z "${STUB_COSIGN_FAIL:-}" ] || { echo 'Error: no matching signatures: none of the expected identities matched' >&2; exit 1; }
 STUB
 chmod +x "$BIN/id" "$BIN/uname" "$BIN/curl" "$BIN/cosign"
+# macOS has no sha256sum, which the publish workflow (it runs on Linux) calls in the steps test_publish_signs_created_digest
+# runs: a stand-in with the same output (hash, two spaces, name) where it is missing.
+command -v sha256sum >/dev/null 2>&1 || { printf '%s\n' '#!/usr/bin/env bash' 'exec shasum -a 256 "$@"' > "$BIN/sha256sum"; chmod +x "$BIN/sha256sum"; }
 # macOS has no timeout(1): a stand-in with its contract (the command's status, 124 when it ran out of time).
 # It is always written (test_timeout_standin tests it on every platform) and used where timeout(1) is missing;
 # STUB_TIMEOUT_STANDIN=1 uses it even where timeout exists.
