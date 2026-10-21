@@ -41,6 +41,7 @@ AGENT="${AGENT-claude}"
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
 #   STUB_PULL_FAIL=1      `docker pull` fails like a registry rate limit
+#   STUB_REPO_DIGEST=x    what the pulled image's RepoDigests hold (empty by default); STUB_COSIGN_FAIL=1 `cosign verify` fails
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
@@ -49,7 +50,7 @@ case "$1" in
   image)
     # image labels, for the update check
     if [ "$2" = inspect ]; then
-      case "$*" in *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; *agent-pod.build*) echo "${STUB_BUILD:-}" ;; esac
+      case "$*" in *RepoDigests*) [ -z "${STUB_REPO_DIGEST:-}" ] || echo "$STUB_REPO_DIGEST" ;; *agent-pod.channel*) echo "${STUB_CHANNEL:-}" ;; *agent-pod.version*) echo "${STUB_VERSION:-}" ;; *agent-pod.build*) echo "${STUB_BUILD:-}" ;; esac
       exit 0
     fi
     if [[ "$*" == *agent-pod-dind* ]]; then
@@ -141,7 +142,13 @@ cat >"$BIN/curl" <<'STUB'
 #!/usr/bin/env bash
 echo '{"latest":"9.9.9","stable":"9.9.9"}'
 STUB
-chmod +x "$BIN/id" "$BIN/uname" "$BIN/curl"
+# cosign: logs the call; STUB_COSIGN_FAIL=1 makes the verification fail like a signature that does not match
+cat >"$BIN/cosign" <<'STUB'
+#!/usr/bin/env bash
+echo "cosign $*" >> "$STUB_LOG"
+[ -z "${STUB_COSIGN_FAIL:-}" ] || { echo 'Error: no matching signatures: none of the expected identities matched' >&2; exit 1; }
+STUB
+chmod +x "$BIN/id" "$BIN/uname" "$BIN/curl" "$BIN/cosign"
 # macOS has no timeout(1): a stand-in with its contract (the command's status, 124 when it ran out of time).
 # It is always written (test_timeout_standin tests it on every platform) and used where timeout(1) is missing;
 # STUB_TIMEOUT_STANDIN=1 uses it even where timeout exists.
@@ -647,6 +654,35 @@ test_base_image() {   # install.sh pulls the published base; a failed pull uses 
   inst AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged "^pull $TAG\$"; logged '^pull node:9-slim$'; logged '^build .*-f .*Dockerfile.base'
 }
 
+test_base_signature() {   # a pulled base is verified with cosign when it is there; a failed check means building it here
+  local d H0 DEF=ghcr.io/alfsch/agent-pod-base
+  sig() {   # sig <VAR=value>... : install.sh with the default repository (the only one that is checked)
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+    printf 'ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n' > "$d/Dockerfile"; printf 'FROM node:9-slim\n' > "$d/Dockerfile.base"
+    printf 'a\n' > "$d/pod-environment.md"
+    H0="$("$d/install.sh" --base-hash)"
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" "$@" ./install.sh claude </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  # verified: the signer is the publish workflow on main, and the base is used as pulled
+  sig; rc_is 0; in_out 'signature verified'; not_logged '-f .*Dockerfile.base'
+  logged "^cosign verify --certificate-oidc-issuer https://token.actions.githubusercontent.com --certificate-identity-regexp .*publish-base.*refs/heads/main.* $DEF:$H0\$"
+  # by digest when Docker knows it
+  sig STUB_REPO_DIGEST="$DEF@sha256:abc"; rc_is 0; logged " $DEF@sha256:abc\$"; not_logged "cosign .* $DEF:$H0"
+  # another repository's digest is not taken for ours
+  sig STUB_REPO_DIGEST="other/repo@sha256:abc"; rc_is 0; logged "cosign .* $DEF:$H0\$"
+  # a signature that does not match: the pulled image is not used, the base is built here
+  sig STUB_COSIGN_FAIL=1; rc_is 0; in_out 'Signature check failed'; in_out 'building it here'; logged "^build .*-f .*Dockerfile.base -t $DEF:$H0 "
+  # no cosign: the base is used, unverified, and it says so; with AGENT_POD_REQUIRE_SIGNED_BASE=1 it is not used
+  sig AGENT_POD_COSIGN=no-such-cosign-here; rc_is 0; in_out 'cosign is not installed'; not_logged '^cosign'; not_logged '-f .*Dockerfile.base'
+  sig AGENT_POD_COSIGN=no-such-cosign-here AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; in_out 'Not using the pulled image'; logged '^build .*-f .*Dockerfile.base'
+  # another repository (a fork): not checked, used unless signatures are required
+  sig AGENT_POD_BASE_REPO=test.invalid/base; rc_is 0; in_out 'not the default repository'; not_logged '^cosign'; not_logged '-f .*Dockerfile.base'
+  sig AGENT_POD_BASE_REPO=test.invalid/base AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; logged '^build .*-f .*Dockerfile.base'
+  # a base that is built here (AGENT_POD_BUILD_BASE=1) or kept after a failed pull is not pulled, so not verified
+  sig AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged '^cosign'
+  sig STUB_PULL_FAIL=1; rc_is 0; not_logged '^cosign'
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
@@ -735,6 +771,16 @@ run_mutants() {
   mutate test_base_image '  refresh_from
   info "Building' '  info "Building' install.sh || rc=1
   mutate test_base_image $'\nensure_base\n' $'\n:\n' install.sh || rc=1
+  mutate test_base_signature '    if ! verify_base; then' '    if false; then' install.sh || rc=1
+  mutate test_base_signature '--certificate-identity-regexp "$SIGNER_IDENTITY"' '--certificate-identity-regexp ".*"' install.sh || rc=1
+  mutate test_base_signature '--certificate-oidc-issuer "$SIGNER_ISSUER"' '--certificate-oidc-issuer ""' install.sh || rc=1
+  mutate test_base_signature '"${ref:-$BASE_IMAGE}"' '"$BASE_IMAGE"' install.sh || rc=1
+  mutate test_base_signature "index(\$0, repo) == 1 { print; exit }" "{ print; exit }" install.sh || rc=1
+  mutate test_base_signature '    printf '"'"'%s  Not verified: cosign is not installed (it checks that CI built this image).%s\n'"'"' "$DIM" "$RESET"
+    [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return' '    return 0' install.sh || rc=1
+  mutate test_base_signature '    printf '"'"'%s  Not verified: %s is not the default repository.%s\n'"'"' "$DIM" "$BASE_REPO" "$RESET"
+    [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return' '    return 0' install.sh || rc=1
+  mutate test_base_signature 'if [ "$BASE_REPO" != "$DEFAULT_BASE_REPO" ]; then' 'if false; then' install.sh || rc=1
   return $rc
 }
 

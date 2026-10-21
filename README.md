@@ -56,6 +56,16 @@ claude-pod claude --dangerously-skip-permissions     # note: the command is stil
 
 **The base image** is published by CI to `ghcr.io/alfsch/agent-pod-base`, tagged with a hash of `Dockerfile.base` and `pod-environment.md`, for amd64 and arm64. `install.sh` pulls it, which saves the minute or two the tools take to build. If the pull fails (offline, a registry rate limit) it uses a local copy of that tag, and without one it builds the base itself from `Dockerfile.base`. `AGENT_POD_BUILD_BASE=1 ./install.sh` always builds it locally, which is the way to run only what you have read; `AGENT_POD_BASE_REPO=registry/path` points at another registry path (a fork). Only the base is published: Claude Code and Copilot CLI are proprietary, so each agent is always installed by your own build.
 
+**Signature.** CI signs the published base keylessly with [cosign](https://docs.sigstore.dev/cosign/overview/) (Sigstore): the signature ties the image digest to `publish-base.yaml` on `main` of this repository. When `cosign` is installed, `install.sh` verifies a pulled base and, if the check fails, does not use that image but builds the base itself; without `cosign` it says that the base is not verified and uses it. `AGENT_POD_REQUIRE_SIGNED_BASE=1` refuses a pulled base that cannot be verified, a missing `cosign` included. By hand:
+
+```sh
+cosign verify ghcr.io/alfsch/agent-pod-base:<tag> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
+```
+
+The signature proves where the image was built, not that the build is free of problems: it is as trustworthy as `main` and the workflow, so `AGENT_POD_BUILD_BASE=1` stays the way to run only what you have read. A base from another registry path (`AGENT_POD_BASE_REPO`) is not checked.
+
 | | Claude Code | Copilot CLI |
 |---|---|---|
 | Pin a version | `CLAUDE_CODE_VERSION=2.0.0 ./install.sh claude` | `COPILOT_CLI_VERSION=2.0.0 ./install.sh copilot` |

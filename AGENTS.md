@@ -72,6 +72,11 @@ test that fails without it.
   not `docker build --pull`, which fails hard. A change to `Dockerfile.base` or `pod-environment.md` reaches users only
   after `publish-base.yaml` has run on `main`; until then the pull fails and they build it. Pull requests build it
   locally, they cannot publish.
+- The published base is signed by `publish-base.yaml` (cosign, keyless) and `install.sh` verifies it when cosign is
+  installed; a failed check builds the base locally instead of using the pulled image, a missing cosign only warns
+  (Docker stays the one requirement) unless `AGENT_POD_REQUIRE_SIGNED_BASE=1`. The signer identity in `install.sh`
+  (`SIGNER_IDENTITY`) names the workflow file and `refs/heads/main`: renaming the workflow means changing both, and a
+  base published from another branch is rightly rejected. Only the default repository is checked.
 - A symlink the user made at `~/.config/agent-pod/<agent>.json` (dotfiles) is theirs and is followed; the pod cannot
   create one there.
 - There is no migration of the old `~/.claude-pod/.claude.json`; the README says how to copy it.
