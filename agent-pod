@@ -7,7 +7,7 @@ BOLD=$'\e[1m'; RED=$'\e[31m'; RESET=$'\e[0m'
 err() { printf '%s✗%s %s\n' "$RED" "$RESET" "$*" >&2; }
 die() { err "$*"; exit 1; }
 
-# The directory of this script (install.sh is next to it), with symlinks resolved: claude-pod and copilot-pod are
+# The directory of this script (install.sh is next to it), with symlinks resolved: claude-pod, copilot-pod and goose-pod are
 # symlinks to it. SELF is the name it was called by.
 SELF="$(basename "${BASH_SOURCE[0]}")"
 _src="${BASH_SOURCE[0]}"
@@ -17,26 +17,28 @@ while [ -L "$_src" ]; do
 done
 HERE="$(cd "$(dirname "$_src")" && pwd)"
 
-# Which agent runs: the name this script was called by (claude-pod, copilot-pod) or its first argument. What
+# Which agent runs: the name this script was called by (claude-pod, copilot-pod, goose-pod) or its first argument. What
 # follows is the command to run inside the container, as before; without one you get a shell.
 AGENT=
-case "$SELF" in claude-pod) AGENT=claude ;; copilot-pod) AGENT=copilot ;; esac
-if [ -z "$AGENT" ]; then case "${1:-}" in claude|copilot) AGENT="$1"; shift ;; esac; fi
+case "$SELF" in claude-pod) AGENT=claude ;; copilot-pod) AGENT=copilot ;; goose-pod) AGENT=goose ;; esac
+if [ -z "$AGENT" ]; then case "${1:-}" in claude|copilot|goose) AGENT="$1"; shift ;; esac; fi
 
 # --help / -h: print copy-pastable usage and exit BEFORE any Docker work, so help still works when Docker is down or
 # no image is built yet. HERE is where the repo lives, so every command printed is copy-pastable as-is, wherever the
 # repo was cloned and whether or not the aliases are set up.
 usage() {
   row() { printf '  %-18s %s%s%s\n' "$1" "$BOLD" "$2" "$RESET"; }
-  printf '%sagent-pod%s — run Claude Code or Copilot CLI in a Docker sandbox scoped to the current folder.\n' "$BOLD" "$RESET"
+  printf '%sagent-pod%s — run Claude Code, Copilot CLI or goose in a Docker sandbox scoped to the current folder.\n' "$BOLD" "$RESET"
   printf '\n%sRun%s  (cd into your project first — the current folder is what gets mounted):\n' "$BOLD" "$RESET"
-  row "Open a shell:"      "$HERE/agent-pod claude          (or: copilot)"
+  row "Open a shell:"      "$HERE/agent-pod claude          (or: copilot, goose)"
   row "Run Claude Code:"   "$HERE/agent-pod claude claude --dangerously-skip-permissions"
   row "Run Copilot CLI:"   "$HERE/agent-pod copilot copilot --yolo"
+  row "Run goose:"         "$HERE/agent-pod goose goose"
   printf '\n%sManage%s  (works from any folder; the first start builds the image of that agent by itself):\n' "$BOLD" "$RESET"
-  row "Install/update:"    "$HERE/install.sh [claude|copilot]"
+  row "Install/update:"    "$HERE/install.sh [claude|copilot|goose]"
   row "Pin a version:"     "CLAUDE_CODE_VERSION=2.0.0 $HERE/install.sh claude"
   row ""                   "COPILOT_CLI_VERSION=2.0.0 $HERE/install.sh copilot"
+  row ""                   "GOOSE_VERSION=1.56.0 $HERE/install.sh goose"
   row "Newest build:"      "CLAUDE_CODE_VERSION=latest $HERE/install.sh claude"
   row "Uninstall:"         "$HERE/uninstall.sh"
   printf '\n%sOptions%s  (prefix any run command):\n' "$BOLD" "$RESET"
@@ -47,40 +49,55 @@ usage() {
   printf '\n'
   row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
   row ""                   "alias copilot-pod=$HERE/copilot-pod"
-  row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod (login, history)"
+  row ""                   "alias goose-pod=$HERE/goose-pod"
+  row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod, $HOME/.goose-pod (login, history)"
   row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/<agent>.json (trust state)"
   row "Full README:"       "https://github.com/alfsch/ai-agent-pods"
 }
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then usage; exit 0; fi
 if [ -z "$AGENT" ]; then
   usage >&2; printf '\n' >&2
-  die "Which agent? Use '$SELF claude' or '$SELF copilot' (or call it as claude-pod or copilot-pod)."
+  die "Which agent? Use '$SELF claude', '$SELF copilot' or '$SELF goose' (or call it as claude-pod, copilot-pod or goose-pod)."
 fi
 
 # The agent-specific part, in one place; everything below is the same for every agent.
 #   A_NAME / A_BIN         what to call it, and its command inside the image
-#   A_PKG / A_CHANNEL      its npm package, and the dist-tag that install.sh and the start-up check follow
+#   A_SRC / A_PKG          where releases come from: "npm" (A_PKG is the package) or "github" (A_PKG is owner/repo,
+#                          a static binary from the release assets)
+#   A_CHANNEL              the dist-tag (npm) or "latest" (github) that install.sh and the start-up check follow
 #   A_VERSION_VAR          the variable that pins a version for install.sh
 #   A_LEGACY_NO_UPDATE     the update opt-out of the single-agent tool, still honoured for this agent only
 #   A_STATE_DIR            host-side state (login, history), kept at the names the single-agent tools used, so that
 #                          existing logins keep working
-#   A_CFG_DIR / A_CFG_FILE where the agent reads its state in HOME, and its main config file (a sibling of that dir)
-#   A_NOUPDATE             NAME=value that turns off the agent's own self-updater
+#   A_CFG_DIR / A_CFG_FILE where the agent reads its state in HOME, and its main config file (a sibling of that dir;
+#                          empty when the agent keeps everything inside A_CFG_DIR)
+#   A_NOUPDATE             NAME=value that turns off the agent's own self-updater (empty: it has none)
+#   A_ENV                  further NAME=value pairs set in the pod
 #   A_FORWARD              host variables that are forwarded when set (token login)
 case "$AGENT" in
   claude)
-    A_NAME="Claude Code"; A_BIN=claude; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
+    A_NAME="Claude Code"; A_BIN=claude; A_SRC=npm; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
     A_VERSION_VAR=CLAUDE_CODE_VERSION; A_LEGACY_NO_UPDATE=CLAUDE_POD_NO_UPDATE
     A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json
-    A_NOUPDATE=DISABLE_AUTOUPDATER=1
+    A_NOUPDATE=DISABLE_AUTOUPDATER=1; A_ENV=
     A_FORWARD=
     ;;
   copilot)
-    A_NAME="Copilot CLI"; A_BIN=copilot; A_PKG=@github/copilot; A_CHANNEL=latest
+    A_NAME="Copilot CLI"; A_BIN=copilot; A_SRC=npm; A_PKG=@github/copilot; A_CHANNEL=latest
     A_VERSION_VAR=COPILOT_CLI_VERSION; A_LEGACY_NO_UPDATE=COPILOT_POD_NO_UPDATE
     A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json
-    A_NOUPDATE=COPILOT_AUTO_UPDATE=false
+    A_NOUPDATE=COPILOT_AUTO_UPDATE=false; A_ENV=
     A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"
+    ;;
+  goose)
+    # goose keeps config, data and state in three XDG dirs, so they are pointed into one mounted dir; there is no
+    # separate config file. No keyring in the pod: secrets go to secrets.yaml there. It has no self-updater.
+    A_NAME="goose"; A_BIN=goose; A_SRC=github; A_PKG=aaif-goose/goose; A_CHANNEL=latest
+    A_VERSION_VAR=GOOSE_VERSION; A_LEGACY_NO_UPDATE=AGENT_POD_NO_UPDATE
+    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=
+    A_NOUPDATE=
+    A_ENV="XDG_CONFIG_HOME=/home/agent-pod/.goose/config XDG_DATA_HOME=/home/agent-pod/.goose/data XDG_STATE_HOME=/home/agent-pod/.goose/state GOOSE_DISABLE_KEYRING=1"
+    A_FORWARD="GOOSE_PROVIDER GOOSE_MODEL ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY"
     ;;
 esac
 IMAGE="agent-pod:$AGENT"
@@ -107,7 +124,7 @@ fi
 #      rebuilt, keeping what was asked for at install time (the channel label: the default channel, "latest", or a
 #      pinned version). This also needs no network.
 #   2. A newer agent release: if the image was built from the agent's default channel (label set by install.sh)
-#      and npm's current version on that channel differs from what's installed, rebuild via install.sh. Images
+#      and the registry's (npm, or the latest GitHub release) current version differs from what's installed, rebuild via install.sh. Images
 #      pinned to a version are left alone, as are images built before the labels existed. A slow/offline registry
 #      (3s cap) just skips the check. Not done after 1., which has just installed the newest version or failed.
 if [ -z "${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}" ]; then
@@ -133,8 +150,14 @@ if [ -z "${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}" ]; then
     if [[ ! "$_installed" =~ ^[0-9] ]]; then
       _installed="$(docker run --rm "$IMAGE" "$A_BIN" --version 2>/dev/null | grep -oE -m1 '[0-9]+\.[0-9]+\.[0-9]+' || true)"
     fi
-    _newest="$(curl -fsSL --max-time 3 "https://registry.npmjs.org/-/package/$A_PKG/dist-tags" 2>/dev/null \
-      | sed -n "s/.*\"$A_CHANNEL\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
+    if [ "$A_SRC" = github ]; then
+      # the redirect of /releases/latest names the tag; no API call, so no rate limit
+      _newest="$(curl -fsSI --max-time 3 -o /dev/null -w '%{redirect_url}' "https://github.com/$A_PKG/releases/latest" 2>/dev/null \
+        | sed -n 's#.*/tag/v\{0,1\}\([0-9][^/]*\)$#\1#p' || true)"
+    else
+      _newest="$(curl -fsSL --max-time 3 "https://registry.npmjs.org/-/package/$A_PKG/dist-tags" 2>/dev/null \
+        | sed -n "s/.*\"$A_CHANNEL\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
+    fi
     if [ -n "$_newest" ] && [ "$_newest" != "$_installed" ]; then
       printf '%s●%s New %s %s (installed: %s) — updating image...\n' "$BOLD" "$RESET" "$A_NAME" "$_newest" "${_installed:-unknown}" >&2
       # Force the channel: an exported version variable must not turn this into a pinned image.
@@ -153,19 +176,22 @@ mkdir -p "$A_STATE_DIR"
 # pod can write to the state dir, and a symlink it left in place of the file would make the host-side steps here and
 # Docker's bind mount follow it to a file outside the project, such as an SSH key. The pod gets the file, never
 # the directory around it, so it cannot replace it.
+# An agent without a config file (A_CFG_FILE empty) keeps it all in its state dir and has none of this.
 A_CFG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod"
 A_CFG_PATH="$A_CFG_HOME/$AGENT.json"
-mkdir -p "$A_CFG_HOME"
-# Docker creates a directory at the target if the source path is missing, so the file must pre-exist on the host
-# before `docker run`. The agent treats an empty file as a JSON parse error, not as "no config", so seed it with {}.
-[ -s "$A_CFG_PATH" ] || printf '{}' > "$A_CFG_PATH"
+if [ -n "$A_CFG_FILE" ]; then
+  mkdir -p "$A_CFG_HOME"
+  # Docker creates a directory at the target if the source path is missing, so the file must pre-exist on the host
+  # before `docker run`. The agent treats an empty file as a JSON parse error, not as "no config", so seed it with {}.
+  [ -s "$A_CFG_PATH" ] || printf '{}' > "$A_CFG_PATH"
+fi
 
 # Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
 # (which can contain code, file contents, and command output the agent saw); on multi-user hosts the
 # default 755/644 modes would let other local users read both. Matches the convention used for
 # ~/.ssh, ~/.aws, ~/.gnupg.
-chmod 700 "$A_STATE_DIR" "$A_CFG_HOME"
-chmod 600 "$A_CFG_PATH"
+chmod 700 "$A_STATE_DIR"
+if [ -n "$A_CFG_FILE" ]; then chmod 700 "$A_CFG_HOME"; chmod 600 "$A_CFG_PATH"; fi
 
 # Mounts & Users:
 #   --user -> dynamic                            Runs container exactly as the host user to prevent permission issues.
@@ -263,7 +289,7 @@ DIND_IMAGE="${DIND_IMAGE:-docker:29-dind-rootless@sha256:ae083cc7de51e7a8e5a597f
 # (default 90, 0 disables). One file per cache means touch is the whole update, so no locks or shared
 # state file are needed; the rare race (a start touching a cache just as another start deletes it) can
 # only cost a cache that has been idle for months, and a volume in use can't be removed anyway.
-# STATE_DIR is deliberately outside the agents' state dirs (~/.claude-pod, ~/.copilot-pod): those are mounted into the pod, so a session could
+# STATE_DIR is deliberately outside the agents' state dirs (~/.claude-pod, ~/.copilot-pod, ~/.goose-pod): those are mounted into the pod, so a session could
 # edit the stamps there and keep (or prematurely drop) its cache.
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-pod/caches"
 prune_dind_caches() {
@@ -439,12 +465,14 @@ fi
 # TERM=xterm with no COLORTERM and supports-color downshifts the whole UI to 16 colors.
 #
 # A_NOUPDATE turns off the agent's built-in self-updater (DISABLE_AUTOUPDATER=1 for Claude Code,
-# COPILOT_AUTO_UPDATE=false for Copilot CLI). Inside the container it can't work (the unprivileged runtime user has
+# COPILOT_AUTO_UPDATE=false for Copilot CLI; goose has none). Inside the container it can't work (the unprivileged runtime user has
 # no write access to the root-owned npm prefix, so it only prints "Auto-update failed"), and updates are handled by
 # rebuilding the image instead: the start-up check above for the default channel, or install.sh for a pinned version.
 #
-# A_FORWARD (Copilot CLI: COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN) are forwarded only when set on the host (bare
-# -e), for token-based login instead of the interactive /login. They take precedence over stored credentials, and
+# A_ENV holds fixed variables of the agent (goose: where its config, data and state live, and no keyring).
+#
+# A_FORWARD (Copilot CLI: COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN; goose: provider keys) are forwarded only when
+# set on the host (bare -e), for token-based login instead of the interactive /login. They take precedence over stored credentials, and
 # they also authenticate `gh` inside the container.
 #
 # Interactive Bash (the default command) ignores SIGTERM even under --init, so `docker stop` would wait
@@ -455,8 +483,9 @@ STOP_FLAGS=()
 if [ -n "${DOCKER:-}" ] && { [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = bash ]; }; }; then
   STOP_FLAGS=(--stop-signal=SIGHUP)
 fi
-AGENT_ENV=(-e "$A_NOUPDATE")
-for _v in $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
+AGENT_ENV=()
+[ -z "$A_NOUPDATE" ] || AGENT_ENV+=(-e "$A_NOUPDATE")
+for _v in $A_ENV $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
 RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${DOCKER:+--name "$POD_NAME"} \
   ${DOCKER:+--init} \
@@ -466,11 +495,11 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   --user "$(id -u):$(id -g)" \
   -e HOME=/home/agent-pod \
   -e COLORTERM \
-  "${AGENT_ENV[@]}" \
+  ${AGENT_ENV[@]+"${AGENT_ENV[@]}"} \
   -v "$PWD:$PWD" \
   -w "$PWD" \
   -v "$A_STATE_DIR:/home/agent-pod/$A_CFG_DIR" \
-  -v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE" \
+  ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
   "$IMAGE" "$@")
 
 # Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay

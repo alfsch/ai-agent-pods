@@ -68,7 +68,7 @@ host Docker  ──runs──▶  pod (agent-pod:<agent> image)         cap-drop
 
 ## Cache design
 
-- Volume `agent-pod-docker-<first 16 hex chars of sha256(pwd -P, sidecar uid:gid)>`, one per physical project path (and not per agent: Claude Code and Copilot CLI in one project share it).
+- Volume `agent-pod-docker-<first 16 hex chars of sha256(pwd -P, sidecar uid:gid)>`, one per physical project path (and not per agent: Claude Code, Copilot CLI and goose in one project share it).
 - **Exclusivity:** a cache session's sidecar has the fixed name `agent-pod-dind-cache-<hash>`. Docker
   rejects a second container with that name atomically, so two sessions can never run dockerd on the same
   data directory. A leftover after `kill -9` is removed with `docker rm -f <name>` (the error message

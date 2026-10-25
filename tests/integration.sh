@@ -4,7 +4,7 @@
 # pod image still has its tools, that the pinned sidecar image still honours the contract the launcher relies
 # on, and that `DOCKER=1` sessions, the cache, TLS and signal handling work end to end.
 #
-# Needs: Docker, the images `agent-pod:claude` and `agent-pod:copilot` (./install.sh builds them) and, for the rootless sidecar, unprivileged
+# Needs: Docker, the images `agent-pod:claude`, `agent-pod:copilot` and `agent-pod:goose` (./install.sh builds them) and, for the rootless sidecar, unprivileged
 # user namespaces (on Ubuntu 24.04+: kernel.apparmor_restrict_unprivileged_userns=0). Network access to pull the
 # inner test image (ITEST_INNER_IMAGES, tried in order). Only exit codes and results are asserted, never timings.
 # The leak check compares resource names before and after, so it assumes that no other agent-pod session starts on
@@ -29,7 +29,7 @@ indent() { sed 's/^/    | /'; }
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 docker info >/dev/null 2>&1 || { echo "the Docker daemon is not running" >&2; exit 2; }
-for _a in claude copilot; do
+for _a in claude copilot goose; do
   [ -n "$(docker image ls -q "agent-pod:$_a" 2>/dev/null)" ] || { echo "image 'agent-pod:$_a' not found: run ./install.sh first" >&2; exit 2; }
 done
 
@@ -97,7 +97,7 @@ wait_running() {
 echo "host uid:gid $HOST_UID:$HOST_GID, docker $(docker version -f '{{.Server.Version}}' 2>/dev/null), inner images: ${INNER_IMAGES[*]}"
 
 section "pod image: the tools the pod and its Docker CLI need"
-for a in claude copilot; do
+for a in claude copilot goose; do
   check "agent-pod:$a has its agent: $a --version" docker run --rm "agent-pod:$a" sh -c "$a --version"
   for t in "gh --version" "yq --version" "git --version" "docker --version" "docker compose version" "docker buildx version"; do
     check "agent-pod:$a has: $t" docker run --rm "agent-pod:$a" sh -c "$t"
@@ -107,7 +107,7 @@ done
 # file must be where each agent looks for it.
 ENV_TOOLS="$(sed -n 's/^Tools on PATH: //p' "$ROOT/pod-environment.md" | tr -d ' ' | tr ',' ' ')"
 check "pod-environment.md lists its tools" test -n "$ENV_TOOLS"
-for a in claude copilot; do
+for a in claude copilot goose; do
   for t in $ENV_TOOLS; do
     check "agent-pod:$a has the tool pod-environment.md names: $t" docker run --rm "agent-pod:$a" sh -c "command -v $t"
   done
@@ -115,15 +115,18 @@ for a in claude copilot; do
   # for Copilot the same text with front matter that applies it to every file (a plain AGENTS.md there counted as nested)
   check "agent-pod:$a has the instructions for Copilot, applied to every file" bash -c 'docker run --rm "$0" cat /etc/agent-pod/pod-environment.instructions.md | cmp -s - <(printf -- "---\napplyTo: \"**\"\n---\n\n"; cat "$1")' "agent-pod:$a" "$ROOT/pod-environment.md"
   check "agent-pod:$a has no AGENTS.md in /etc/agent-pod" bash -c 'docker run --rm "$0" test ! -e /etc/agent-pod/AGENTS.md' "agent-pod:$a"
+  # goose reads this one, from outside its mounted state dir
+  check "agent-pod:$a has the instructions for goose at ~/.agents/AGENTS.md" bash -c 'docker run --rm "$0" cat /home/agent-pod/.agents/AGENTS.md | cmp -s - "$1"' "agent-pod:$a" "$ROOT/pod-environment.md"
   check "agent-pod:$a points Copilot at /etc/agent-pod" bash -c 'docker run --rm "$0" sh -c "echo \$COPILOT_CUSTOM_INSTRUCTIONS_DIRS" | grep -qx /etc/agent-pod' "agent-pod:$a"
 done
 # the label that makes the launcher rebuild a stale image is the hash install.sh computes now
-for a in claude copilot; do
+for a in claude copilot goose; do
   # both values are fetched with their exit status and must be non-empty: two empty strings are not "the same hash"
   check "agent-pod:$a was built from the current repo (label agent-pod.build)" bash -c 'l="$(docker image inspect --format "{{index .Config.Labels \"agent-pod.build\"}}" "$0")" || exit 1; w="$("$1/install.sh" --build-hash)" || exit 1; [ -n "$w" ] && [ "$l" = "$w" ]' "agent-pod:$a" "$ROOT"
 done
 check "agent-pod:claude does not carry Copilot CLI" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:claude copilot
 check "agent-pod:copilot does not carry Claude Code" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:copilot claude
+check "agent-pod:goose does not carry Claude Code or Copilot CLI" bash -c 'for c in claude copilot; do docker run --rm "$0" sh -c "command -v $c" && exit 1; done; exit 0' agent-pod:goose
 
 section "pinned sidecar image: the contract the launcher relies on"
 PIN="$(grep -o 'docker:[0-9a-z.-]*-dind-rootless@sha256:[0-9a-f]\{64\}' "$LAUNCHER" | head -n1)"
@@ -198,6 +201,10 @@ check "the other agent reuses the same cache" grep -q "reusing $CACHE_VOL" "$WOR
 if [ -n "$CACHE_IMG" ] && [ "$rc" = 0 ]; then ok "the image pulled by the first agent is in the cache of the other"; else fail "the image pulled by the first agent is in the cache of the other"; tail -n 10 "$WORK/cache3.out" | indent; fi
 AGENT=copilot run_launcher DOCKER=1 -- sh -c 'copilot --version && docker info >/dev/null' >"$WORK/copilot.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then ok "a Copilot CLI session with DOCKER=1 runs"; else fail "a Copilot CLI session with DOCKER=1 runs (exit $rc)"; tail -n 20 "$WORK/copilot.out" | indent; fi
+# goose keeps config, data and state in one mounted dir: everything it would write lands in ~/.goose-pod on the host.
+AGENT=goose run_launcher -- sh -c 'goose info >/dev/null 2>&1; mkdir -p "$XDG_STATE_HOME/goose" "$XDG_CONFIG_HOME/goose" && echo s > "$XDG_STATE_HOME/goose/probe" && echo c > "$XDG_CONFIG_HOME/goose/probe"; ls -A /home/agent-pod' >"$WORK/goose.out" 2>&1; rc=$?
+check "a goose session writes its state and config into the host state dir" bash -c '[ "$1" = 0 ] && [ "$(cat "$2/state/goose/probe")" = s ] && [ "$(cat "$2/config/goose/probe")" = c ]' x "$rc" "$WORK/home/.goose-pod"
+check "a goose session has no config file mount and leaves ~/.config/agent-pod without goose.json" bash -c '[ ! -e "$1/agent-pod/goose.json" ]' x "$WORK/config"
 
 section "a running cache session: exclusivity, TLS, SIGTERM"
 start_launcher DOCKER=1 DOCKER_CACHE=1 -- sleep 300 >"$WORK/long.out" 2>&1

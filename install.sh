@@ -11,8 +11,8 @@ err()  { printf '%s✗%s %s\n'       "$RED"   "$RESET" "$*" >&2; }
 die()  { err "$*"; trap - ERR; exit 1; }
 trap 'err "install.sh failed at line $LINENO"' ERR
 
-# Usage: install.sh [claude|copilot|all]   (default: all)
-# Pin a version with CLAUDE_CODE_VERSION=x.y.z or COPILOT_CLI_VERSION=x.y.z (for the agent named on the command
+# Usage: install.sh [claude|copilot|goose|all]   (default: all)
+# Pin a version with CLAUDE_CODE_VERSION=x.y.z, COPILOT_CLI_VERSION=x.y.z or GOOSE_VERSION=x.y.z (for the agent named on the command
 # line). The launcher calls this by itself when the image of an agent is missing or outdated.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -30,9 +30,9 @@ if [ "${1:-}" = "--base-hash" ]; then base_hash; exit 0; fi
 
 WHICH="${1:-all}"
 case "$WHICH" in
-  claude|copilot) AGENTS=("$WHICH") ;;
-  all)            AGENTS=(claude copilot) ;;
-  *)              die "Unknown agent '$WHICH'. Use claude, copilot or all." ;;
+  claude|copilot|goose) AGENTS=("$WHICH") ;;
+  all)                  AGENTS=(claude copilot goose) ;;
+  *)                    die "Unknown agent '$WHICH'. Use claude, copilot, goose or all." ;;
 esac
 
 command -v docker >/dev/null || die "Docker is required but not on PATH."
@@ -130,10 +130,11 @@ ensure_base
 
 # Builds agent-pod:<agent>. The agent-specific values are the same ones as in the launcher's table.
 install_agent() {
-  local agent="$1" name pkg channel version_var requested channel_label version resolved
+  local agent="$1" name src pkg channel version_var requested channel_label version resolved
   case "$agent" in
-    claude)  name="Claude Code"; pkg=@anthropic-ai/claude-code; channel=stable; version_var=CLAUDE_CODE_VERSION ;;
-    copilot) name="Copilot CLI"; pkg=@github/copilot;           channel=latest; version_var=COPILOT_CLI_VERSION ;;
+    claude)  name="Claude Code"; src=npm;    pkg=@anthropic-ai/claude-code; channel=stable; version_var=CLAUDE_CODE_VERSION ;;
+    copilot) name="Copilot CLI"; src=npm;    pkg=@github/copilot;           channel=latest; version_var=COPILOT_CLI_VERSION ;;
+    goose)   name="goose";       src=github; pkg=aaif-goose/goose;          channel=latest; version_var=GOOSE_VERSION ;;
   esac
   local image="agent-pod:$agent"
 
@@ -143,24 +144,32 @@ install_agent() {
   requested="${!version_var:-$channel}"
   channel_label="$requested"
   version="$requested"
+  # GitHub release tags start with "v"; the version in the image label and in the download URL is the bare number.
+  if [ "$src" = github ]; then version="${version#v}"; channel_label="${channel_label#v}"; fi
 
-  # Resolve a dist-tag to a concrete version from the npm registry, so the version number becomes the
-  # cache key: the npm layer is reused while the tag is unchanged and rebuilt when it moves. If the
-  # lookup fails, the tag stays as is and gets the CACHEBUST fallback below.
+  # Resolve a dist-tag to a concrete version from the npm registry (for a GitHub release: the tag that
+  # /releases/latest redirects to), so the version number becomes the cache key: the install layer is reused while
+  # the tag is unchanged and rebuilt when it moves. If the lookup fails, the tag stays as is and gets the CACHEBUST
+  # fallback below.
   if [[ ! "$version" =~ ^[0-9] ]]; then
-    resolved="$(curl -fsSL --max-time 10 "https://registry.npmjs.org/-/package/$pkg/dist-tags" 2>/dev/null \
-      | sed -n "s/.*\"$version\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
+    if [ "$src" = github ]; then
+      resolved="$(curl -fsSI --max-time 10 -o /dev/null -w '%{redirect_url}' "https://github.com/$pkg/releases/latest" 2>/dev/null \
+        | sed -n 's#.*/tag/v\{0,1\}\([0-9][^/]*\)$#\1#p' || true)"
+    else
+      resolved="$(curl -fsSL --max-time 10 "https://registry.npmjs.org/-/package/$pkg/dist-tags" 2>/dev/null \
+        | sed -n "s/.*\"$version\"[[:space:]]*:[[:space:]]*\"\([0-9][^\"]*\)\".*/\1/p" || true)"
+    fi
     if [ -n "$resolved" ]; then
       version="$resolved"
     else
-      printf '%s  Could not resolve "%s" from npm; building without cache for this step.%s\n' "$DIM" "$version" "$RESET"
+      printf '%s  Could not resolve "%s" from the registry; building without cache for this step.%s\n' "$DIM" "$version" "$RESET"
     fi
   fi
 
   # For pinned versions, the version literal is itself the cache key, so the layer rebuilds whenever the pin
   # changes. For an unresolved dist-tag the literal never changes while the version it points to does, so
   # we pass CACHEBUST=$(date +%s) to force a refetch.
-  local build_args=(--build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "AGENT=$agent" --build-arg "AGENT_PKG=$pkg"
+  local build_args=(--build-arg "BASE_IMAGE=$BASE_IMAGE" --build-arg "AGENT=$agent" --build-arg "AGENT_SRC=$src" --build-arg "AGENT_PKG=$pkg"
                     --build-arg "AGENT_VERSION=$version" --build-arg "AGENT_CHANNEL=$channel_label"
                     --build-arg "BUILD_HASH=$(build_hash)")
   if [[ ! "$version" =~ ^[0-9] ]]; then
@@ -199,7 +208,7 @@ install_agent() {
   echo
 
   info "Verifying"
-  # `<agent> --version` prints the resolved npm version. Wrapped in if/else so a failure is reported
+  # `<agent> --version` prints the resolved version. Wrapped in if/else so a failure is reported
   # with a clear message instead of tripping the ERR trap; the previous image stays untouched.
   if resolved="$(docker run --rm "$tmp_image" "$agent" --version 2>&1)"; then
     printf '  %s%-13s %s %s\n' "$DIM" "$agent:" "$RESET" "$resolved"
@@ -219,7 +228,9 @@ printf '  cd into your work-in-progress project folder first, then:\n'
 printf '    Open shell in pod:          %s%s/agent-pod claude%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '    Or run an agent directly:   %s%s/agent-pod claude claude --dangerously-skip-permissions%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '                                %s%s/agent-pod copilot copilot --yolo%s\n' "$BOLD" "$REPO_DIR" "$RESET"
+printf '                                %s%s/agent-pod goose goose%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '    Shell with Docker:          %sDOCKER=1 %s/agent-pod claude%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '    Docker + image cache:       %sDOCKER=1 DOCKER_CACHE=1 %s/agent-pod claude%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '    Optional shell aliases:     %salias claude-pod=%s/claude-pod%s\n' "$BOLD" "$REPO_DIR" "$RESET"
 printf '                                %salias copilot-pod=%s/copilot-pod%s\n' "$BOLD" "$REPO_DIR" "$RESET"
+printf '                                %salias goose-pod=%s/goose-pod%s\n' "$BOLD" "$REPO_DIR" "$RESET"
