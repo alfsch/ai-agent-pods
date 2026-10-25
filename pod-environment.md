@@ -5,7 +5,9 @@ Copilot CLI and goose alike; it is about the container, not about the project.
 
 - The project folder is mounted at the same path as on the host, and so are the agent's login and settings from the
   host (`~/.claude` and `~/.claude.json` for Claude Code, `~/.copilot` and `~/.copilot.json` for Copilot CLI, `~/.goose` for goose). Those
-  persist. Everything else, the rest of `/home/agent-pod` included, is thrown away when the session ends (`--rm`).
+  persist, and so do the global skills in `~/.agents/skills` (all agents) and, for goose, `~/.agents/plugins` and
+  `~/.agents/agents`: what you put there is available in later sessions of other projects too. Everything else, the
+  rest of `/home/agent-pod` included, is thrown away when the session ends (`--rm`).
 - You run as a normal user with a host uid and no name, in `/home/agent-pod`. There is no `sudo`, no capabilities, and
   the system directories are read-only for you. Installing into the system fails: use a Python virtual environment
   (`python3 -m venv .venv`), a project-local `npm install`, or a binary in the project folder.

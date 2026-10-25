@@ -508,7 +508,7 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   setup_case; AGENT=goose launch -- true
   rc_is 0
   logged " -v $H/.goose-pod:/home/agent-pod/.goose "
-  logged " -e XDG_CONFIG_HOME=/home/agent-pod/.goose/config -e XDG_DATA_HOME=/home/agent-pod/.goose/data -e XDG_STATE_HOME=/home/agent-pod/.goose/state -e GOOSE_DISABLE_KEYRING=1 -e GOOSE_PROVIDER -e GOOSE_MODEL -e ANTHROPIC_API_KEY "
+  logged " -e XDG_CONFIG_HOME=/home/agent-pod/.goose/config -e XDG_DATA_HOME=/home/agent-pod/.goose/data -e XDG_STATE_HOME=/home/agent-pod/.goose/state -e GOOSE_DISABLE_KEYRING=1 -e GH_CONFIG_DIR=/home/agent-pod/.config/gh -e GOOSE_PROVIDER -e GOOSE_MODEL -e ANTHROPIC_API_KEY "
   not_logged 'DISABLE_AUTOUPDATER'; not_logged 'COPILOT_'; not_logged 'GITHUB_TOKEN'; not_logged 'GH_TOKEN'; not_logged 'goose\.json'; not_logged ' -e  '
   [ ! -e "$H/config/agent-pod/goose.json" ] && [ -d "$H/.goose-pod" ] && [ ! -e "$H/.claude-pod" ] || fail "state of the wrong agent, or a config file for goose"
   # ~/.agents is read-only in the image, so what goose writes there (skills, plugins) is mounted from outside the
@@ -876,7 +876,8 @@ run_mutants() {
   mutate test_agent_flags   'A_NOUPDATE=COPILOT_AUTO_UPDATE=false' 'A_NOUPDATE=DISABLE_AUTOUPDATER=1' || rc=1
   mutate test_agent_flags   'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"' 'A_FORWARD=' || rc=1
   mutate test_agent_flags   'A_STATE_DIR="$HOME/.copilot-pod"' 'A_STATE_DIR="$HOME/.claude-pod"' || rc=1
-  mutate test_agent_flags   ' GOOSE_DISABLE_KEYRING=1"' '"' || rc=1
+  mutate test_agent_flags   ' GOOSE_DISABLE_KEYRING=1 GH_CONFIG_DIR=/home/agent-pod/.config/gh"' ' GH_CONFIG_DIR=/home/agent-pod/.config/gh"' || rc=1
+  mutate test_agent_flags   ' GH_CONFIG_DIR=/home/agent-pod/.config/gh"' '"' || rc=1
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1

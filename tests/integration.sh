@@ -209,9 +209,10 @@ PLUG="$PROJ/plugsrc"; mkdir -p "$PLUG/skills/audit"
 printf '{"name":"itest-plugin","version":"1.0.0"}\n' > "$PLUG/gemini-extension.json"
 printf -- '---\nname: audit\ndescription: Audit\n---\nDo an audit.\n' > "$PLUG/skills/audit/SKILL.md"
 (cd "$PLUG" && git init -q && git -c user.email=a@b -c user.name=n add . && git -c user.email=a@b -c user.name=n commit -qm i)
-AGENT=goose run_launcher -- sh -c 'goose info && goose plugin install '"$PLUG"' && mkdir -p "$HOME/.agents/skills/probe" "$HOME/.agents/agents" && echo s > "$HOME/.agents/skills/probe/SKILL.md" && echo a > "$HOME/.agents/agents/probe.md" && cat "$HOME/.agents/AGENTS.md" >/dev/null' >"$WORK/goose.out" 2>&1; rc=$?
+AGENT=goose run_launcher -- sh -c 'goose info && goose plugin install "$1" && mkdir -p "$HOME/.agents/skills/probe" "$HOME/.agents/agents" && echo s > "$HOME/.agents/skills/probe/SKILL.md" && echo a > "$HOME/.agents/agents/probe.md" && cat "$HOME/.agents/AGENTS.md" >/dev/null && gh config set editor probe' sh "$PLUG" >"$WORK/goose.out" 2>&1; rc=$?
 check "a goose session succeeds and goose writes its log into the host state dir" bash -c '[ "$1" = 0 ] && [ -n "$(find "$2/state/goose/logs" -type f 2>/dev/null | head -n1)" ]' x "$rc" "$WORK/home/.goose-pod"
 check "a goose plugin install works as the host uid and persists on the host" test -f "$WORK/config/agent-pod/goose-plugins/itest-plugin/skills/audit/SKILL.md"
+check "gh's config (its login) written in a goose session does not land in the persistent state dir" bash -c '[ "$1" = 0 ] && [ ! -e "$2/config/gh" ]' x "$rc" "$WORK/home/.goose-pod"
 check "a global skill written by goose persists on the host" test -f "$WORK/config/agent-pod/goose-skills/probe/SKILL.md"
 check "a global agent definition written by goose persists on the host" test -f "$WORK/config/agent-pod/goose-agents/probe.md"
 for a in claude copilot; do
