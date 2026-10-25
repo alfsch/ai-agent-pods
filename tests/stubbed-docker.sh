@@ -511,11 +511,16 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   logged " -e XDG_CONFIG_HOME=/home/agent-pod/.goose/config -e XDG_DATA_HOME=/home/agent-pod/.goose/data -e XDG_STATE_HOME=/home/agent-pod/.goose/state -e GOOSE_DISABLE_KEYRING=1 -e GOOSE_PROVIDER -e GOOSE_MODEL -e ANTHROPIC_API_KEY "
   not_logged 'DISABLE_AUTOUPDATER'; not_logged 'COPILOT_'; not_logged 'GITHUB_TOKEN'; not_logged 'GH_TOKEN'; not_logged 'goose\.json'; not_logged ' -e  '
   [ ! -e "$H/config/agent-pod/goose.json" ] && [ -d "$H/.goose-pod" ] && [ ! -e "$H/.claude-pod" ] || fail "state of the wrong agent, or a config file for goose"
-  # ~/.agents/plugins is not writable in the image, so it is a mount from outside the pod-writable state dir
-  logged " -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins "
-  [ -d "$H/config/agent-pod/goose-plugins" ] || fail "the plugins dir of goose was not created on the host"
+  # ~/.agents is read-only in the image, so what goose writes there (skills, plugins) is mounted from outside the
+  # pod-writable state dir
+  logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins "
+  [ -d "$H/config/agent-pod/goose-skills" ] && [ -d "$H/config/agent-pod/goose-plugins" ] || fail "the skills or plugins dir of goose was not created on the host"
+  # the other agents read global skills from there too, but have no plugins there
   setup_case; AGENT=claude launch -- true
-  not_logged 'plugins'; [ ! -e "$H/config/agent-pod/claude-plugins" ] || fail "a plugins dir for claude"
+  logged " -v $H/config/agent-pod/claude-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
+  [ -d "$H/config/agent-pod/claude-skills" ] && [ ! -e "$H/config/agent-pod/goose-skills" ] || fail "the skills dir of the wrong agent"
+  setup_case; AGENT=copilot launch -- true
+  logged " -v $H/config/agent-pod/copilot-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
 }
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
@@ -874,8 +879,11 @@ run_mutants() {
   mutate test_agent_flags   ' GOOSE_DISABLE_KEYRING=1"' '"' || rc=1
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
-  mutate test_agent_flags   '${A_EXTRA_DIR:+-v "$A_EXTRA_PATH:/home/agent-pod/$A_EXTRA_DIR"}' '' || rc=1
-  mutate test_agent_flags   'if [ -n "$A_EXTRA_DIR" ]; then mkdir -p "$A_EXTRA_PATH"' 'if false; then mkdir -p "$A_EXTRA_PATH"' || rc=1
+  mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; ' '' || rc=1
+  mutate test_agent_flags   'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=' || rc=1
+  mutate test_agent_flags   'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=' || rc=1
+  mutate test_agent_flags   'A_EXTRA_DIRS=".agents/skills .agents/plugins"' 'A_EXTRA_DIRS=".agents/skills"' || rc=1
   mutate test_agent_flags   $'if [ -n "$A_CFG_FILE" ]; then\n  mkdir' $'if true; then\n  mkdir' || rc=1
   mutate test_agent_flags   '[ -z "$A_NOUPDATE" ] || AGENT_ENV' 'true; AGENT_ENV' || rc=1
   mutate test_cache_shared_between_agents '_hash="$(' '_hash="$AGENT$(' || rc=1

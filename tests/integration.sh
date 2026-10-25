@@ -202,10 +202,20 @@ if [ -n "$CACHE_IMG" ] && [ "$rc" = 0 ]; then ok "the image pulled by the first 
 AGENT=copilot run_launcher DOCKER=1 -- sh -c 'copilot --version && docker info >/dev/null' >"$WORK/copilot.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then ok "a Copilot CLI session with DOCKER=1 runs"; else fail "a Copilot CLI session with DOCKER=1 runs (exit $rc)"; tail -n 20 "$WORK/copilot.out" | indent; fi
 # goose keeps config, data and state in one mounted dir: what goose itself writes (`goose info` logs to its state dir)
-# lands in ~/.goose-pod on the host, not in the throwaway home. Its plugins dir is a second mount that the host uid can write.
-AGENT=goose run_launcher -- sh -c 'goose info && touch "$HOME/.agents/plugins/probe" && cat "$HOME/.agents/AGENTS.md" >/dev/null' >"$WORK/goose.out" 2>&1; rc=$?
+# lands in ~/.goose-pod on the host, not in the throwaway home. ~/.agents is read-only in the image; the dirs agents write
+# there (global skills, goose's plugins) are mounts the host uid can write, and they persist on the host.
+PLUG="$PROJ/plugsrc"  # in the project folder: the only host dir the pod sees; mkdir -p "$PLUG/skills/audit"
+printf '{"name":"itest-plugin","version":"1.0.0"}\n' > "$PLUG/gemini-extension.json"
+printf -- '---\nname: audit\ndescription: Audit\n---\nDo an audit.\n' > "$PLUG/skills/audit/SKILL.md"
+(cd "$PLUG" && git init -q && git -c user.email=a@b -c user.name=n add . && git -c user.email=a@b -c user.name=n commit -qm i)
+AGENT=goose run_launcher -- sh -c 'goose info && goose plugin install '"$PLUG"' && mkdir -p "$HOME/.agents/skills/probe" && echo s > "$HOME/.agents/skills/probe/SKILL.md" && cat "$HOME/.agents/AGENTS.md" >/dev/null' >"$WORK/goose.out" 2>&1; rc=$?
 check "a goose session succeeds and goose writes its log into the host state dir" bash -c '[ "$1" = 0 ] && [ -n "$(find "$2/state/goose/logs" -type f 2>/dev/null | head -n1)" ]' x "$rc" "$WORK/home/.goose-pod"
-check "a goose session can write ~/.agents/plugins, which persists on the host" test -e "$WORK/config/agent-pod/goose-plugins/probe"
+check "a goose plugin install works as the host uid and persists on the host" test -f "$WORK/config/agent-pod/goose-plugins/itest-plugin/skills/audit/SKILL.md"
+check "a global skill written by goose persists on the host" test -f "$WORK/config/agent-pod/goose-skills/probe/SKILL.md"
+for a in claude copilot; do
+  AGENT=$a run_launcher -- sh -c 'mkdir -p "$HOME/.agents/skills/probe" && echo s > "$HOME/.agents/skills/probe/SKILL.md"' >"$WORK/skills-$a.out" 2>&1; rc=$?
+  check "a $a session can write a global skill in ~/.agents/skills, which persists on the host" bash -c '[ "$1" = 0 ] && [ -f "$2/agent-pod/$3-skills/probe/SKILL.md" ]' x "$rc" "$WORK/config" "$a"
+done
 check "a goose session has no config file mount and leaves ~/.config/agent-pod without goose.json" bash -c '[ ! -e "$1/agent-pod/goose.json" ]' x "$WORK/config"
 
 section "a running cache session: exclusivity, TLS, SIGTERM"
