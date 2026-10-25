@@ -522,6 +522,24 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   setup_case; AGENT=copilot launch -- true
   logged " -v $H/config/agent-pod/copilot-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
 }
+test_git_identity() {   # a git config of the user is the pod's global one: read-only, by override, agent file or shared file
+  local C
+  gi() { setup_case; C="$H/config/agent-pod"; mkdir -p "$C"; }
+  # none: no mount at all (Docker would create a directory)
+  gi; launch -- true; rc_is 0; not_logged 'gitconfig'
+  gi; echo a > "$C/gitconfig"; launch -- true; rc_is 0; logged " -v $C/gitconfig:/home/agent-pod/.gitconfig:ro "
+  # the agent's own file wins over the shared one, and another agent's file is not used
+  gi; echo a > "$C/gitconfig"; echo b > "$C/$AGENT.gitconfig"; echo c > "$C/other.gitconfig"; launch -- true; rc_is 0
+  logged " -v $C/$AGENT.gitconfig:/home/agent-pod/.gitconfig:ro "; not_logged "$C/gitconfig:"; not_logged 'other\.gitconfig'
+  gi; echo c > "$C/other.gitconfig"; launch -- true; rc_is 0; not_logged 'gitconfig'
+  # the override wins over both
+  gi; echo a > "$C/gitconfig"; echo b > "$C/$AGENT.gitconfig"; echo w > "$CASE/work"; launch AGENT_POD_GITCONFIG="$CASE/work" -- true; rc_is 0
+  logged " -v $CASE/work:/home/agent-pod/.gitconfig:ro "
+  [ "$(grep -o 'gitconfig:ro' "$STUB_LOG" | wc -l | tr -d ' ')" = 1 ] || fail "the override was not the only git config mounted"
+  # an override that is not a file is an error, not a fallback to another identity, and nothing is started
+  gi; echo a > "$C/gitconfig"; launch AGENT_POD_GITCONFIG="$CASE/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_GITCONFIG was accepted"
+  in_out 'AGENT_POD_GITCONFIG='; not_logged '^run '
+}
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
   for a in claude copilot goose; do
@@ -881,6 +899,13 @@ run_mutants() {
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
+  mutate test_git_identity  '/home/agent-pod/.gitconfig:ro' '/home/agent-pod/.gitconfig' || rc=1
+  mutate test_git_identity  'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_git_identity  'elif [ -f "$A_CFG_HOME/gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_git_identity  '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"' '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"' || rc=1
+  mutate test_git_identity  '  [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."' '  :' || rc=1
+  mutate test_git_identity  'if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then' 'if false; then' || rc=1
   mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; ' '' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=' || rc=1

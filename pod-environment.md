@@ -19,7 +19,7 @@ Copilot CLI and goose alike; it is about the container, not about the project.
   containers are at `dind:<port>`, not `localhost`. Without `DOCKER=1` those commands fail.
 - `gh` is authenticated only if the host had `GH_TOKEN` or `GITHUB_TOKEN` set: Copilot CLI sessions pass them on,
   Claude Code and goose sessions do not (`COPILOT_GITHUB_TOKEN` is for Copilot itself, not for `gh`). `gh auth login` works
-  with the open network, but its login is lost when the session ends. There is no SSH key or git credential for pushes.
+  with the open network, but its login is lost when the session ends. There is no SSH key or git credential for pushes. `git` has an identity only if the user gave the session a git config (mounted read-only as `~/.gitconfig`); without one, commits fail with "Author identity unknown" and you can pass one per command (`git -c user.name=... -c user.email=... commit`).
 
 Tools on PATH: git, curl, less, jq, gh, yq, python3, pip, pdftotext, qpdf, tesseract, node, npm, docker
 

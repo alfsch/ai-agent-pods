@@ -117,6 +117,17 @@ All of them are environment variables in front of the launcher:
 | `DOCKER_CACHE=1` | keep that daemon's images between sessions, one cache per project |
 | `DOCKER_CACHE_MAX_AGE_DAYS=30` | prune caches unused for that long (default 90, 0 = never) |
 | `DIND_IMAGE=...` | another sidecar image (pin by digest) |
+| `AGENT_POD_GITCONFIG=~/.gitconfig-work` | the git config used as the pod's global one (see below); must be a file |
+
+**Git identity.** The pod's home is thrown away, so git has no name or email in it and commits fail with "Author identity unknown". Put a git config with just the identity (author and committer both come from it) in `~/.config/agent-pod/gitconfig`:
+
+```ini
+[user]
+    name = Your Name
+    email = you@example.com
+```
+
+The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file; for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
 
 ### Using Docker inside the pod
 
@@ -167,6 +178,7 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 
 - `~/.claude-pod/`, `~/.copilot-pod/` and `~/.goose-pod/`: auth, settings, session history (transcripts can contain code and command output the agent saw).
 - `~/.config/agent-pod/claude.json` and `copilot.json` (under `$XDG_CONFIG_HOME` if set): the agent's account binding and project trust state, one file per agent for all projects. Edit them there. They are outside the state dirs on purpose: the pod can write to a state dir, and a symlink it left in place of the file would make the launcher and Docker follow it to a host file. The pod gets the file, not its directory. If you used the single-agent claude-pod or copilot-pod before, copy its `.claude.json` or `.copilot.json` from the state dir to that path to keep the trust state (login credentials stay in the state dir).
+- `~/.config/agent-pod/gitconfig` and `<agent>.gitconfig` (or the file named by `AGENT_POD_GITCONFIG`): only read, never written, and mounted read-only.
 - Docker images `agent-pod:claude`, `agent-pod:copilot`, `agent-pod:goose`, the base image `ghcr.io/alfsch/agent-pod-base:*` and the `node:24-slim` image it is built from; with `DOCKER_CACHE=1` one `agent-pod-docker-*` volume per project; with `DOCKER=1` on a Linux host whose uid is not 1000 an `agent-pod-dind:*` image; Docker build cache. Pruning markers in `~/.local/state/agent-pod/caches/`.
 - Outbound network during build (ghcr.io for the base image, Docker Hub, apt mirrors, npm) and at runtime (the agent's API, whatever your code reaches).
 

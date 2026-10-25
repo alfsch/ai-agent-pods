@@ -46,12 +46,14 @@ usage() {
   row "Isolate/limit:"     "NET=none MEMORY=4g PIDS=512 $HERE/agent-pod claude"
   row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
   row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
+  row "Git identity:"      "AGENT_POD_GITCONFIG=~/.gitconfig-work $HERE/agent-pod claude"
   printf '\n'
   row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
   row ""                   "alias copilot-pod=$HERE/copilot-pod"
   row ""                   "alias goose-pod=$HERE/goose-pod"
   row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod, $HOME/.goose-pod (login, history)"
   row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/<agent>.json (trust state)"
+  row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/[<agent>.]gitconfig (git identity, read-only in the pod)"
   row "Full README:"       "https://github.com/alfsch/ai-agent-pods"
 }
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then usage; exit 0; fi
@@ -198,6 +200,21 @@ for _d in $A_EXTRA_DIRS; do
   mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; chmod 700 "$A_CFG_HOME" "$A_CFG_HOME/$AGENT-${_d##*/}"
   EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$AGENT-${_d##*/}:/home/agent-pod/$_d")
 done
+
+# The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
+# thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
+# commit as another identity); else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
+# would create a directory for a missing source). It stays outside the state dir, which the pod can write, and the pod
+# cannot change it. Whatever it holds is visible to the pod: keep it to the identity.
+GIT_MOUNT=()
+if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then
+  [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."
+  _g="$AGENT_POD_GITCONFIG"
+elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"
+elif [ -f "$A_CFG_HOME/gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"
+else _g=
+fi
+[ -z "$_g" ] || GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
 
 # Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
 # (which can contain code, file contents, and command output the agent saw); on multi-user hosts the
@@ -514,6 +531,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   -v "$A_STATE_DIR:/home/agent-pod/$A_CFG_DIR" \
   ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
+  ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
   "$IMAGE" "$@")
 
 # Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay
