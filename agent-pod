@@ -96,10 +96,10 @@ case "$AGENT" in
   goose)
     # goose keeps config, data and state in three XDG dirs, so they are pointed into one mounted dir; there is no
     # separate config file. No keyring in the pod: secrets go to secrets.yaml there. It has no self-updater. Its
-    # plugins go to ~/.agents/plugins whatever the XDG variables say, and its global skills to ~/.agents/skills.
+    # plugins go to ~/.agents/plugins whatever the XDG variables say, its global skills to ~/.agents/skills and its agent definitions to ~/.agents/agents.
     A_NAME="goose"; A_BIN=goose; A_SRC=github; A_PKG=aaif-goose/goose; A_CHANNEL=latest
     A_VERSION_VAR=GOOSE_VERSION; A_LEGACY_NO_UPDATE=AGENT_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=; A_EXTRA_DIRS=".agents/skills .agents/plugins"
+    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=; A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"
     A_NOUPDATE=
     A_ENV="XDG_CONFIG_HOME=/home/agent-pod/.goose/config XDG_DATA_HOME=/home/agent-pod/.goose/data XDG_STATE_HOME=/home/agent-pod/.goose/state GOOSE_DISABLE_KEYRING=1"
     A_FORWARD="GOOSE_PROVIDER GOOSE_MODEL ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY"

@@ -513,11 +513,11 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   [ ! -e "$H/config/agent-pod/goose.json" ] && [ -d "$H/.goose-pod" ] && [ ! -e "$H/.claude-pod" ] || fail "state of the wrong agent, or a config file for goose"
   # ~/.agents is read-only in the image, so what goose writes there (skills, plugins) is mounted from outside the
   # pod-writable state dir
-  logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins "
-  [ -d "$H/config/agent-pod/goose-skills" ] && [ -d "$H/config/agent-pod/goose-plugins" ] || fail "the skills or plugins dir of goose was not created on the host"
+  logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins -v $H/config/agent-pod/goose-agents:/home/agent-pod/.agents/agents "
+  [ -d "$H/config/agent-pod/goose-skills" ] && [ -d "$H/config/agent-pod/goose-plugins" ] && [ -d "$H/config/agent-pod/goose-agents" ] || fail "the skills or plugins dir of goose was not created on the host"
   # the other agents read global skills from there too, but have no plugins there
   setup_case; AGENT=claude launch -- true
-  logged " -v $H/config/agent-pod/claude-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
+  logged " -v $H/config/agent-pod/claude-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'; not_logged '\.agents/agents'
   [ -d "$H/config/agent-pod/claude-skills" ] && [ ! -e "$H/config/agent-pod/goose-skills" ] || fail "the skills dir of the wrong agent"
   setup_case; AGENT=copilot launch -- true
   logged " -v $H/config/agent-pod/copilot-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
@@ -883,7 +883,7 @@ run_mutants() {
   mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; ' '' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=' || rc=1
-  mutate test_agent_flags   'A_EXTRA_DIRS=".agents/skills .agents/plugins"' 'A_EXTRA_DIRS=".agents/skills"' || rc=1
+  mutate test_agent_flags   'A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"' 'A_EXTRA_DIRS=".agents/skills .agents/plugins"' || rc=1
   mutate test_agent_flags   $'if [ -n "$A_CFG_FILE" ]; then\n  mkdir' $'if true; then\n  mkdir' || rc=1
   mutate test_agent_flags   '[ -z "$A_NOUPDATE" ] || AGENT_ENV' 'true; AGENT_ENV' || rc=1
   mutate test_cache_shared_between_agents '_hash="$(' '_hash="$AGENT$(' || rc=1
