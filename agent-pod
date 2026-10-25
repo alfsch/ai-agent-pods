@@ -205,7 +205,9 @@ done
 # thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
 # commit as another identity); else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
 # would create a directory for a missing source). It stays outside the state dir, which the pod can write, and the pod
-# cannot change it. Whatever it holds is visible to the pod: keep it to the identity.
+# cannot change it. Whatever it holds is visible to the pod: keep it to the identity. The path is made absolute (Docker
+# takes a relative source for a volume name), and a file in a directory the pod can write (the project, the state dir, the
+# dirs mounted from the config dir) is refused: the pod could replace it with a symlink to a host key.
 GIT_MOUNT=()
 if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then
   [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."
@@ -214,7 +216,16 @@ elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfi
 elif [ -f "$A_CFG_HOME/gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"
 else _g=
 fi
-[ -z "$_g" ] || GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
+if [ -n "$_g" ]; then
+  _gd="$(cd "$(dirname "$_g")" && pwd -P)" || die "Cannot use $_g."
+  _g="$_gd/$(basename "$_g")"
+  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _w in "${_writable[@]}"; do
+    _w="$(cd "$_w" && pwd -P)" || continue
+    case "$_gd/" in "$_w"/*) die "The git config $_g is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
+  done
+  GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
+fi
 
 # Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
 # (which can contain code, file contents, and command output the agent saw); on multi-user hosts the

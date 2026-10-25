@@ -523,8 +523,9 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   logged " -v $H/config/agent-pod/copilot-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
 }
 test_git_identity() {   # a git config of the user is the pod's global one: read-only, by override, agent file or shared file
-  local C
-  gi() { setup_case; C="$H/config/agent-pod"; mkdir -p "$C"; }
+  local C P
+  # the launcher mounts the physical path (macOS: /var is /private/var), so the expectations use it too
+  gi() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; P="$(cd "$CASE" && pwd -P)"; }
   # none: no mount at all (Docker would create a directory)
   gi; launch -- true; rc_is 0; not_logged 'gitconfig'
   gi; echo a > "$C/gitconfig"; launch -- true; rc_is 0; logged " -v $C/gitconfig:/home/agent-pod/.gitconfig:ro "
@@ -534,11 +535,24 @@ test_git_identity() {   # a git config of the user is the pod's global one: read
   gi; echo c > "$C/other.gitconfig"; launch -- true; rc_is 0; not_logged 'gitconfig'
   # the override wins over both
   gi; echo a > "$C/gitconfig"; echo b > "$C/$AGENT.gitconfig"; echo w > "$CASE/work"; launch AGENT_POD_GITCONFIG="$CASE/work" -- true; rc_is 0
-  logged " -v $CASE/work:/home/agent-pod/.gitconfig:ro "
+  logged " -v $P/work:/home/agent-pod/.gitconfig:ro "
   [ "$(grep -o 'gitconfig:ro' "$STUB_LOG" | wc -l | tr -d ' ')" = 1 ] || fail "the override was not the only git config mounted"
+  # a relative override (the launcher runs in the project folder) reaches Docker as an absolute path: a relative source is a volume name
+  gi; echo w > "$CASE/work"; launch AGENT_POD_GITCONFIG=../work -- true; rc_is 0
+  logged " -v $P/work:/home/agent-pod/.gitconfig:ro "; not_logged ' -v \.\./work'
   # an override that is not a file is an error, not a fallback to another identity, and nothing is started
   gi; echo a > "$C/gitconfig"; launch AGENT_POD_GITCONFIG="$CASE/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_GITCONFIG was accepted"
   in_out 'AGENT_POD_GITCONFIG='; not_logged '^run '
+  # a file the pod can write to (project folder, the agent's state dir) could be replaced by a symlink to a host key: refused
+  gi; echo w > "$PROJ/gc"; launch AGENT_POD_GITCONFIG="$PROJ/gc" -- true; [ "$RC" != 0 ] || fail "a git config in the project folder was accepted"
+  in_out 'can write'; not_logged '^run '
+  gi; mkdir -p "$H/.claude-pod/sub" "$H/.copilot-pod/sub" "$H/.goose-pod/sub"; echo w > "$H/.claude-pod/sub/gc"; echo w > "$H/.copilot-pod/sub/gc"; echo w > "$H/.goose-pod/sub/gc"
+  launch AGENT_POD_GITCONFIG="$H/.${AGENT:-claude}-pod/sub/gc" -- true; [ "$RC" != 0 ] || fail "a git config in the state dir was accepted"
+  not_logged '^run '
+  gi; mkdir -p "$H/config/agent-pod/${AGENT:-claude}-skills"; echo w > "$H/config/agent-pod/${AGENT:-claude}-skills/gc"
+  launch AGENT_POD_GITCONFIG="$H/config/agent-pod/${AGENT:-claude}-skills/gc" -- true; [ "$RC" != 0 ] || fail "a git config in a mounted skills dir was accepted"
+  # but a neighbouring directory with a similar name is fine
+  gi; mkdir -p "$PROJ-other"; echo w > "$PROJ-other/gc"; launch AGENT_POD_GITCONFIG="$PROJ-other/gc" -- true; rc_is 0
 }
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
@@ -900,6 +914,11 @@ run_mutants() {
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
+  mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
+  mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
+  mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$PWD");' || rc=1
+  mutate test_git_identity  'for _d in $A_EXTRA_DIRS; do _writable+=' 'for _d in; do _writable+=' || rc=1
+  mutate test_git_identity  'case "$_gd/" in "$_w"/*)' 'case "$_gd/" in "$_w")' || rc=1
   mutate test_git_identity  '/home/agent-pod/.gitconfig:ro' '/home/agent-pod/.gitconfig' || rc=1
   mutate test_git_identity  'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
   mutate test_git_identity  'elif [ -f "$A_CFG_HOME/gitconfig" ]; then' 'elif false; then' || rc=1

@@ -127,7 +127,7 @@ All of them are environment variables in front of the launcher:
     email = you@example.com
 ```
 
-The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file; for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
+The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file; for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity; a file in the project folder or in a directory the pod can write is refused too, because the pod could swap it for a symlink to a host file). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
 
 ### Using Docker inside the pod
 
