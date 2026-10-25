@@ -1,5 +1,11 @@
 # ai-agent-pods
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub stars](https://img.shields.io/github/stars/alfsch/ai-agent-pods)](https://github.com/alfsch/ai-agent-pods/stargazers)
+[![GitHub issues](https://img.shields.io/github/issues/alfsch/ai-agent-pods)](https://github.com/alfsch/ai-agent-pods/issues)
+[![GitHub forks](https://img.shields.io/github/forks/alfsch/ai-agent-pods)](https://github.com/alfsch/ai-agent-pods/network)
+[![Contributors](https://img.shields.io/github/contributors/alfsch/ai-agent-pods)](https://github.com/alfsch/ai-agent-pods/graphs/contributors)
+
 > Docker sandbox for AI coding agents: [Claude Code](https://www.anthropic.com/claude-code) and the [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli), one launcher for both. Runs the agent against one project folder, so your home directory, SSH keys and other projects stay invisible to the container. Unofficial.
 
 ![claude-pod and copilot-pod](assets/cover.jpeg)
