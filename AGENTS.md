@@ -2,22 +2,27 @@
 
 Read by Claude Code (through `CLAUDE.md`), Copilot CLI and other agents. The same rules apply to people.
 
-Runs Claude Code or the GitHub Copilot CLI in a hardened Docker container scoped to the current folder. One
-launcher, `agent-pod` (symlinks `claude-pod` and `copilot-pod` select the agent by name); `install.sh` builds
-`agent-pod:claude` and `agent-pod:copilot` from `Dockerfile` (the agent) on top of `Dockerfile.base` (the shared tools; published by CI to GHCR),
+Runs Claude Code, the GitHub Copilot CLI or goose in a hardened Docker container scoped to the current folder. One
+launcher, `agent-pod` (symlinks `claude-pod`, `copilot-pod` and `goose-pod` select the agent by name); `install.sh` builds
+`agent-pod:claude`, `agent-pod:copilot` and `agent-pod:goose` from `Dockerfile` (the agent) on top of `Dockerfile.base` (the shared tools; published by CI to GHCR),
 `uninstall.sh` removes everything. User docs
 are in `README.md`.
 
-## One launcher, two agents
+## One launcher, three agents
 
 - Everything that differs between the agents is in the agent table (`case "$AGENT"`) at the top of `agent-pod`
-  and the same two values in `install.sh` (npm package, default channel, version variable). Anything else that
-  mentions an agent by name is a bug: the sidecar, cache and signal logic are the same for both.
-- State dirs stay `~/.claude-pod` and `~/.copilot-pod` so existing logins keep working; the container home is
-  `/home/agent-pod` for both. The Docker cache is per project, not per agent.
+  and the same values in `install.sh` (source, package or repository, default channel, version variable). Anything else that
+  mentions an agent by name is a bug: the sidecar, cache and signal logic are the same for all.
+- State dirs stay `~/.claude-pod` and `~/.copilot-pod` (goose: `~/.goose-pod`) so existing logins keep working; the container home is
+  `/home/agent-pod` for all. The Docker cache is per project, not per agent.
 - The agent's config file (`.claude.json`, `.copilot.json`) lives in `~/.config/agent-pod/<agent>.json`, never in
   the state dir: the pod can write to the state dir and could leave a symlink in place of the file. The pod gets
-  the file, not its directory. Do not move it back.
+  the file, not its directory. Do not move it back. goose has no such file (`A_CFG_FILE` empty): its XDG config, data and
+  state dirs are pointed into its state dir by `A_ENV`, so everything it writes is in the mounted dir, nothing outside.
+- goose is the one agent that does not come from npm (`A_SRC=github`): its static musl binary is taken from the release
+  assets (tag from the `/releases/latest` redirect, not the API). The release has no checksum file to verify; the
+  keyring is off (`GOOSE_DISABLE_KEYRING=1`) because the pod has none. The pod environment file reaches it as
+  `~/.agents/AGENTS.md` (baked into the base, outside the mounted dir).
 - Without the image of an agent the launcher builds it with `install.sh` (next to the real script, symlinks resolved).
 
 ## Before changing the Docker sidecar (`DOCKER=1` / `DOCKER_CACHE=1`)

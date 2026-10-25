@@ -38,10 +38,12 @@ RUN mkdir -p /home/agent-pod && chmod 777 /home/agent-pod
 # would be hidden. Claude Code reads /etc/claude-code/CLAUDE.md (managed memory; seen in /memory). Copilot CLI reads
 # *.instructions.md files from the directories in COPILOT_CUSTOM_INSTRUCTIONS_DIRS; a plain AGENTS.md there was
 # taken as a nested one that applies only to files below /etc/agent-pod, so the file has the front matter that
-# applies it to every file. Same text for both.
+# applies it to every file. goose reads ~/.agents/AGENTS.md (its state is in the mounted ~/.goose, so this one is not
+# hidden). Same text for all three.
 COPY pod-environment.md /etc/claude-code/CLAUDE.md
 RUN mkdir -p /etc/agent-pod \
- && { printf -- '---\napplyTo: "**"\n---\n\n'; cat /etc/claude-code/CLAUDE.md; } > /etc/agent-pod/pod-environment.instructions.md
+ && { printf -- '---\napplyTo: "**"\n---\n\n'; cat /etc/claude-code/CLAUDE.md; } > /etc/agent-pod/pod-environment.instructions.md \
+ && mkdir -p /home/agent-pod/.agents && cp /etc/claude-code/CLAUDE.md /home/agent-pod/.agents/AGENTS.md
 ENV COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/etc/agent-pod
 
 # Interactive-shell setup, appended to /etc/bash.bashrc. Only interactive bash sources this file, so

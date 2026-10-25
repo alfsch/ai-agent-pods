@@ -148,10 +148,14 @@ cat >"$BIN/uname" <<'STUB'
 #!/usr/bin/env bash
 case "${1:-}" in -s) echo "${STUB_UNAME:-Linux}" ;; *) exec /usr/bin/uname "$@" ;; esac
 STUB
-# the npm registry: both channels are at 9.9.9
+# the npm registry: both channels are at 9.9.9; GitHub's /releases/latest redirects to the tag v9.9.9
 cat >"$BIN/curl" <<'STUB'
 #!/usr/bin/env bash
-echo '{"latest":"9.9.9","stable":"9.9.9"}'
+case "$*" in
+  *package/aaif-goose*) exit 22 ;;   # a GitHub repository is not an npm package
+  *redirect_url*) echo 'https://github.com/o/r/releases/tag/v9.9.9' ;;
+  *) echo '{"latest":"9.9.9","stable":"9.9.9"}' ;;
+esac
 STUB
 # cosign: logs the call; STUB_COSIGN_FAIL=1 makes the verification fail like a signature that does not match
 cat >"$BIN/cosign" <<'STUB'
@@ -467,7 +471,7 @@ test_term_before_pod_pid() {   # a stop request in the gap before POD_PID is kno
 
 test_agent_selection() {   # the agent comes from the name the launcher was called by, or from its first argument
   local a n d
-  for a in claude copilot; do
+  for a in claude copilot goose; do
     setup_case; d="$CASE/links"; mkdir -p "$d"; ln -s "$LAUNCHER" "$d/$a-pod"
     AGENT='' LAUNCHER="$d/$a-pod" launch -- true
     rc_is 0; logged "^run --rm .*agent-pod:$a true\$"
@@ -499,10 +503,60 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   logged " -v $H/.copilot-pod:/home/agent-pod/.copilot "; logged " -v $H/config/agent-pod/copilot.json:/home/agent-pod/.copilot.json "
   [ -s "$H/config/agent-pod/copilot.json" ] && [ ! -e "$H/.claude-pod" ] || fail "state dir of the wrong agent"
   logged " -e HOME=/home/agent-pod "
+  # goose: everything inside one mounted dir (XDG dirs pointed into it, no keyring), no self-updater switch, no config
+  # file and so no mount of one, the provider keys forwarded, no token for gh
+  setup_case; AGENT=goose launch -- true
+  rc_is 0
+  logged " -v $H/.goose-pod:/home/agent-pod/.goose "
+  logged " -e XDG_CONFIG_HOME=/home/agent-pod/.goose/config -e XDG_DATA_HOME=/home/agent-pod/.goose/data -e XDG_STATE_HOME=/home/agent-pod/.goose/state -e GOOSE_DISABLE_KEYRING=1 -e GH_CONFIG_DIR=/home/agent-pod/.config/gh -e GOOSE_PROVIDER -e GOOSE_MODEL -e ANTHROPIC_API_KEY "
+  not_logged 'DISABLE_AUTOUPDATER'; not_logged 'COPILOT_'; not_logged 'GITHUB_TOKEN'; not_logged 'GH_TOKEN'; not_logged 'goose\.json'; not_logged ' -e  '
+  [ ! -e "$H/config/agent-pod/goose.json" ] && [ -d "$H/.goose-pod" ] && [ ! -e "$H/.claude-pod" ] || fail "state of the wrong agent, or a config file for goose"
+  # ~/.agents is read-only in the image, so what goose writes there (skills, plugins) is mounted from outside the
+  # pod-writable state dir
+  logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins -v $H/config/agent-pod/goose-agents:/home/agent-pod/.agents/agents "
+  [ -d "$H/config/agent-pod/goose-skills" ] && [ -d "$H/config/agent-pod/goose-plugins" ] && [ -d "$H/config/agent-pod/goose-agents" ] || fail "the skills or plugins dir of goose was not created on the host"
+  # the other agents read global skills from there too, but have no plugins there
+  setup_case; AGENT=claude launch -- true
+  logged " -v $H/config/agent-pod/claude-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'; not_logged '\.agents/agents'
+  [ -d "$H/config/agent-pod/claude-skills" ] && [ ! -e "$H/config/agent-pod/goose-skills" ] || fail "the skills dir of the wrong agent"
+  setup_case; AGENT=copilot launch -- true
+  logged " -v $H/config/agent-pod/copilot-skills:/home/agent-pod/.agents/skills "; not_logged 'plugins'
+}
+test_git_identity() {   # a git config of the user is the pod's global one: read-only, by override, agent file or shared file
+  local C P
+  # the launcher mounts the physical path (macOS: /var is /private/var), so the expectations use it too
+  gi() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; P="$(cd "$CASE" && pwd -P)"; }
+  # none: no mount at all (Docker would create a directory)
+  gi; launch -- true; rc_is 0; not_logged 'gitconfig'
+  gi; echo a > "$C/gitconfig"; launch -- true; rc_is 0; logged " -v $C/gitconfig:/home/agent-pod/.gitconfig:ro "
+  # the agent's own file wins over the shared one, and another agent's file is not used
+  gi; echo a > "$C/gitconfig"; echo b > "$C/$AGENT.gitconfig"; echo c > "$C/other.gitconfig"; launch -- true; rc_is 0
+  logged " -v $C/$AGENT.gitconfig:/home/agent-pod/.gitconfig:ro "; not_logged "$C/gitconfig:"; not_logged 'other\.gitconfig'
+  gi; echo c > "$C/other.gitconfig"; launch -- true; rc_is 0; not_logged 'gitconfig'
+  # the override wins over both
+  gi; echo a > "$C/gitconfig"; echo b > "$C/$AGENT.gitconfig"; echo w > "$CASE/work"; launch AGENT_POD_GITCONFIG="$CASE/work" -- true; rc_is 0
+  logged " -v $P/work:/home/agent-pod/.gitconfig:ro "
+  [ "$(grep -o 'gitconfig:ro' "$STUB_LOG" | wc -l | tr -d ' ')" = 1 ] || fail "the override was not the only git config mounted"
+  # a relative override (the launcher runs in the project folder) reaches Docker as an absolute path: a relative source is a volume name
+  gi; echo w > "$CASE/work"; launch AGENT_POD_GITCONFIG=../work -- true; rc_is 0
+  logged " -v $P/work:/home/agent-pod/.gitconfig:ro "; not_logged ' -v \.\./work'
+  # an override that is not a file is an error, not a fallback to another identity, and nothing is started
+  gi; echo a > "$C/gitconfig"; launch AGENT_POD_GITCONFIG="$CASE/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_GITCONFIG was accepted"
+  in_out 'AGENT_POD_GITCONFIG='; not_logged '^run '
+  # a file the pod can write to (project folder, the agent's state dir) could be replaced by a symlink to a host key: refused
+  gi; echo w > "$PROJ/gc"; launch AGENT_POD_GITCONFIG="$PROJ/gc" -- true; [ "$RC" != 0 ] || fail "a git config in the project folder was accepted"
+  in_out 'can write'; not_logged '^run '
+  gi; mkdir -p "$H/.claude-pod/sub" "$H/.copilot-pod/sub" "$H/.goose-pod/sub"; echo w > "$H/.claude-pod/sub/gc"; echo w > "$H/.copilot-pod/sub/gc"; echo w > "$H/.goose-pod/sub/gc"
+  launch AGENT_POD_GITCONFIG="$H/.${AGENT:-claude}-pod/sub/gc" -- true; [ "$RC" != 0 ] || fail "a git config in the state dir was accepted"
+  not_logged '^run '
+  gi; mkdir -p "$H/config/agent-pod/${AGENT:-claude}-skills"; echo w > "$H/config/agent-pod/${AGENT:-claude}-skills/gc"
+  launch AGENT_POD_GITCONFIG="$H/config/agent-pod/${AGENT:-claude}-skills/gc" -- true; [ "$RC" != 0 ] || fail "a git config in a mounted skills dir was accepted"
+  # but a neighbouring directory with a similar name is fine
+  gi; mkdir -p "$PROJ-other"; echo w > "$PROJ-other/gc"; launch AGENT_POD_GITCONFIG="$PROJ-other/gc" -- true; rc_is 0
 }
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
-  for a in claude copilot; do
+  for a in claude copilot goose; do
     setup_case; AGENT=$a launch DOCKER=1 DOCKER_CACHE=1 -- true
     rc_is 0; logged "^run -d --privileged --init --name agent-pod-dind-cache-$HASH "
     logged " -v agent-pod-docker-$HASH:/home/rootless/.local/share/docker "
@@ -510,7 +564,7 @@ test_cache_shared_between_agents() {   # one Docker cache per project, whichever
 }
 test_lazy_build() {   # a missing image is built by install.sh (next to the launcher) before the first start
   local a d
-  for a in claude copilot; do
+  for a in claude copilot goose; do
     setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
     printf '%s\n' '#!/usr/bin/env bash' 'echo "install.sh $*" >> "$STUB_LOG"; : > "$STUB_DIR/installed"' > "$d/install.sh"; chmod +x "$d/install.sh"
     AGENT=$a LAUNCHER="$d/agent-pod" launch STUB_NO_IMAGE=1 -- true
@@ -552,13 +606,13 @@ test_update_check() {   # a newer release on the image's channel rebuilds it; th
     # (not printed and captured: a fail() inside $(...) would only end that subshell and the check would still pass)
     setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
     printf '%s\n' '#!/usr/bin/env bash' 'echo "install.sh $*" >> "$STUB_LOG"' > "$d/install.sh"; chmod +x "$d/install.sh"
-    local a="$1" v="$2" ch=latest; shift 2; [ "$a" = claude ] || [ "$a" = copilot ] || return 1
+    local a="$1" v="$2" ch=latest; shift 2; [ "$a" = claude ] || [ "$a" = copilot ] || [ "$a" = goose ] || return 1
     [ "$a" = claude ] && ch=stable
     AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= STUB_CHANNEL=$ch STUB_VERSION="$v" "$@" -- true
     [ "$RC" = 0 ] || fail "launcher exit $RC"
     if grep -q "^install.sh $a\$" "$STUB_LOG"; then UPD=update; else UPD=no; fi
   }
-  for a in claude copilot; do
+  for a in claude copilot goose; do
     upd $a 1.0.0; [ "$UPD" = update ] || fail "$a: an outdated image was not updated"
     upd $a 9.9.9; [ "$UPD" != update ] || fail "$a: an image at the newest version was rebuilt"
     upd $a 1.0.0 AGENT_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "$a: AGENT_POD_NO_UPDATE did not skip the update"
@@ -566,6 +620,7 @@ test_update_check() {   # a newer release on the image's channel rebuilds it; th
   # the old variable of one agent says nothing about the other
   upd claude 1.0.0 CLAUDE_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "CLAUDE_POD_NO_UPDATE did not skip Claude"
   upd copilot 1.0.0 COPILOT_POD_NO_UPDATE=1; [ "$UPD" != update ] || fail "COPILOT_POD_NO_UPDATE did not skip Copilot"
+  upd goose 1.0.0 CLAUDE_POD_NO_UPDATE=1; [ "$UPD" = update ] || fail "CLAUDE_POD_NO_UPDATE skipped the update of goose"
   upd copilot 1.0.0 CLAUDE_POD_NO_UPDATE=1; [ "$UPD" = update ] || fail "CLAUDE_POD_NO_UPDATE skipped the update of Copilot"
   upd claude 1.0.0 COPILOT_POD_NO_UPDATE=1; [ "$UPD" = update ] || fail "COPILOT_POD_NO_UPDATE skipped the update of Claude"
   # an image built while npm was unreachable has the tag as its version label: the real version comes from the image,
@@ -590,7 +645,7 @@ test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash
   rb() {   # rb <agent> <VAR=value>... : runs the launcher with a stub install.sh that answers --build-hash with "new"
     setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$LAUNCHER" "$d/agent-pod"
     printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = --build-hash ]; then echo new; exit 0; fi' \
-      'echo "install.sh $*" >> "$STUB_LOG"; echo "pin ${CLAUDE_CODE_VERSION:-}${COPILOT_CLI_VERSION:-}" >> "$STUB_LOG"; exit "${STUB_INSTALL_EXIT:-0}"' > "$d/install.sh"
+      'echo "install.sh $*" >> "$STUB_LOG"; echo "pin ${CLAUDE_CODE_VERSION:-}${COPILOT_CLI_VERSION:-}${GOOSE_VERSION:-}" >> "$STUB_LOG"; exit "${STUB_INSTALL_EXIT:-0}"' > "$d/install.sh"
     chmod +x "$d/install.sh"
     local a="$1"; shift
     AGENT=$a LAUNCHER="$d/agent-pod" launch AGENT_POD_NO_UPDATE= "$@" -- true
@@ -603,6 +658,7 @@ test_rebuild_on_repo_change() {   # an image built from another Dockerfile (hash
   rb copilot STUB_BUILD= STUB_CHANNEL=latest; rc_is 0; logged '^install.sh copilot$'
   # a pinned image keeps its version
   rb copilot STUB_BUILD=old STUB_CHANNEL=1.2.3; rc_is 0; logged '^pin 1.2.3$'
+  rb goose STUB_BUILD=old STUB_CHANNEL=1.2.3; rc_is 0; logged '^install.sh goose$'; logged '^pin 1.2.3$'
   # the same hash: nothing is rebuilt
   rb claude STUB_BUILD=new STUB_CHANNEL=stable STUB_VERSION=9.9.9; rc_is 0; not_logged '^install.sh'
   # opt-out
@@ -670,6 +726,24 @@ test_base_image() {   # install.sh pulls the published base; a failed pull uses 
   inst AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged "^pull $TAG\$"; logged '^pull node:9-slim$'; logged '^build .*-f .*Dockerfile.base'
 }
 
+test_install_agent_source() {   # install.sh tells the Dockerfile where each agent comes from; goose's "latest" is the GitHub release
+  local d
+  inst() {   # inst <agent> <VAR=value>... : runs a copy of install.sh next to stub Dockerfiles
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+    printf 'ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n' > "$d/Dockerfile"; printf 'FROM node:9-slim\n' > "$d/Dockerfile.base"; printf 'a\n' > "$d/pod-environment.md"
+    local a="$1"; shift
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" AGENT_POD_BASE_REPO=test.invalid/base ${1+"$@"} ./install.sh "$a" </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  inst claude; rc_is 0; logged '--build-arg AGENT_SRC=npm --build-arg AGENT_PKG=@anthropic-ai/claude-code --build-arg AGENT_VERSION=9.9.9 '
+  inst goose; rc_is 0; logged '--build-arg AGENT=goose --build-arg AGENT_SRC=github --build-arg AGENT_PKG=aaif-goose/goose --build-arg AGENT_VERSION=9.9.9 --build-arg AGENT_CHANNEL=latest '
+  not_logged 'CACHEBUST'; logged '^tag agent-pod:new-goose-[0-9]* agent-pod:goose$'
+  # a pin is used as it is, without the "v" of the release tag, and is the channel label (so the image is not auto-updated)
+  inst goose GOOSE_VERSION=v1.2.3; rc_is 0; logged '--build-arg AGENT_VERSION=1.2.3 --build-arg AGENT_CHANNEL=1.2.3 '
+  inst goose GOOSE_VERSION=1.2.3; rc_is 0; logged '--build-arg AGENT_VERSION=1.2.3 --build-arg AGENT_CHANNEL=1.2.3 '
+  # a pin of another agent does not reach goose
+  inst goose CLAUDE_CODE_VERSION=1.0.0; rc_is 0; logged '--build-arg AGENT_VERSION=9.9.9 '
+}
+
 test_base_signature() {   # a pulled base is verified with cosign when it is there; a failed check means building it here
   local d H0 ID DEF=ghcr.io/alfsch/agent-pod-base
   sig() {   # sig <VAR=value>... : install.sh with the default repository (the only one that is checked)
@@ -719,7 +793,10 @@ test_agent_install_layer() {   # the install layer of Dockerfile runs the agent 
     printf '%s\n' '#!/usr/bin/env bash' 'n="$(cat "$STUB_DIR/agent-runs" 2>/dev/null || echo 0)"; echo $((n + 1)) > "$STUB_DIR/agent-runs"' \
       'echo "agent $*" >> "$STUB_LOG"; [ "$((n + 1))" -gt "${AGENT_FAILS:-0}" ] || { echo "no platform package found" >&2; exit 1; }' > "$d/claude"
     printf '%s\n' '#!/usr/bin/env bash' 'echo "sleep $*" >> "$STUB_LOG"' > "$d/sleep"
-    chmod +x "$d/npm" "$d/claude" "$d/sleep"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "curl $*" >> "$STUB_LOG"; [ "${CURL_FAILS:-0}" != 0 ] || echo tarball' > "$d/curl"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "tar $*" >> "$STUB_LOG"; [ -n "$(cat)" ]' > "$d/tar"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo x86_64' > "$d/uname"
+    chmod +x "$d/npm" "$d/claude" "$d/sleep" "$d/curl" "$d/tar" "$d/uname"
     RC=0; env PATH="$d:$PATH" AGENT_PKG=pkg AGENT_VERSION=1.2.3 AGENT=claude "$@" sh -c "$body" >"$CASE/out" 2>"$CASE/err" || RC=$?
   }
   installs() { grep -c '^npm install' "$STUB_LOG" || true; }
@@ -732,6 +809,14 @@ test_agent_install_layer() {   # the install layer of Dockerfile runs the agent 
     || fail "the calls were not install, run, uninstall, install, run"
   # npm itself fails the first time: also tried again
   layer NPM_FAILS=1; rc_is 0; [ "$(installs)" = 2 ] || fail "expected 2 installs after an npm failure, got $(installs)"
+  # a github agent comes from the musl release tarball of its repository, not from npm
+  layer AGENT_SRC=github AGENT_PKG=o/r AGENT_VERSION=1.2.3 AGENT=claude; rc_is 0; not_logged '^npm'
+  logged '^curl -fsSL https://github.com/o/r/releases/download/v1.2.3/claude-x86_64-unknown-linux-musl.tar.gz$'; logged '^tar -xz -C /usr/local/bin ./claude$'
+  # a version that install.sh could not resolve stays "latest" and must not become a tag "vlatest"
+  layer AGENT_SRC=github AGENT_PKG=o/r AGENT_VERSION=latest AGENT=claude; rc_is 0
+  logged '^curl -fsSL https://github.com/o/r/releases/latest/download/claude-x86_64-unknown-linux-musl.tar.gz$'; not_logged 'vlatest'
+  layer AGENT_SRC=github AGENT_FAILS=1; rc_is 0; [ "$(grep -c '^curl' "$STUB_LOG")" = 2 ] || fail "a github install that did not start was not repeated"
+  layer AGENT_SRC=github CURL_FAILS=99; [ "$RC" != 0 ] || fail "a github install whose download fails succeeded"
   # it never starts: three tries, then the build fails
   layer AGENT_FAILS=99; [ "$RC" != 0 ] || fail "a build with an agent that never starts succeeded"
   [ "$(installs)" = 3 ] || fail "expected 3 installs, got $(installs)"; in_out 'Attempt 3 of installing pkg@1.2.3 failed'
@@ -816,11 +901,36 @@ run_mutants() {
   mutate test_int_hup_running 'trap stop_pod TERM INT HUP' 'trap stop_pod TERM' || rc=1
   mutate test_int_hup_startup "trap 'exit 130' INT" "trap 'exit 1' INT" || rc=1
   mutate test_int_hup_startup "trap 'exit 129' HUP" "trap 'exit 1' HUP" || rc=1
-  mutate test_agent_selection 'case "$SELF" in claude-pod) AGENT=claude ;; copilot-pod) AGENT=copilot ;; esac' ':' || rc=1
+  mutate test_agent_selection 'case "$SELF" in claude-pod) AGENT=claude ;; copilot-pod) AGENT=copilot ;; goose-pod) AGENT=goose ;; esac' ':' || rc=1
+  mutate test_agent_selection ' goose-pod) AGENT=goose ;;' '' || rc=1
+  mutate test_agent_selection 'claude|copilot|goose) AGENT="$1"' 'claude|copilot) AGENT="$1"' || rc=1
   mutate test_agent_selection '[ -L "$_src" ]' 'false' || rc=1
   mutate test_agent_flags   'A_NOUPDATE=COPILOT_AUTO_UPDATE=false' 'A_NOUPDATE=DISABLE_AUTOUPDATER=1' || rc=1
   mutate test_agent_flags   'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"' 'A_FORWARD=' || rc=1
   mutate test_agent_flags   'A_STATE_DIR="$HOME/.copilot-pod"' 'A_STATE_DIR="$HOME/.claude-pod"' || rc=1
+  mutate test_agent_flags   ' GOOSE_DISABLE_KEYRING=1 GH_CONFIG_DIR=/home/agent-pod/.config/gh"' ' GH_CONFIG_DIR=/home/agent-pod/.config/gh"' || rc=1
+  mutate test_agent_flags   ' GH_CONFIG_DIR=/home/agent-pod/.config/gh"' '"' || rc=1
+  mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
+  mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
+  mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
+  mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
+  mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
+  mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$PWD");' || rc=1
+  mutate test_git_identity  'for _d in $A_EXTRA_DIRS; do _writable+=' 'for _d in; do _writable+=' || rc=1
+  mutate test_git_identity  'case "$_gd/" in "$_w"/*)' 'case "$_gd/" in "$_w")' || rc=1
+  mutate test_git_identity  '/home/agent-pod/.gitconfig:ro' '/home/agent-pod/.gitconfig' || rc=1
+  mutate test_git_identity  'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_git_identity  'elif [ -f "$A_CFG_HOME/gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_git_identity  '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"' '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"' || rc=1
+  mutate test_git_identity  '  [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."' '  :' || rc=1
+  mutate test_git_identity  'if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then' 'if false; then' || rc=1
+  mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; ' '' || rc=1
+  mutate test_agent_flags   'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=' || rc=1
+  mutate test_agent_flags   'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=' || rc=1
+  mutate test_agent_flags   'A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"' 'A_EXTRA_DIRS=".agents/skills .agents/plugins"' || rc=1
+  mutate test_agent_flags   $'if [ -n "$A_CFG_FILE" ]; then\n  mkdir' $'if true; then\n  mkdir' || rc=1
+  mutate test_agent_flags   '[ -z "$A_NOUPDATE" ] || AGENT_ENV' 'true; AGENT_ENV' || rc=1
   mutate test_cache_shared_between_agents '_hash="$(' '_hash="$AGENT$(' || rc=1
   mutate test_lazy_build    '"$HERE/install.sh" "$AGENT" >&2 || die' 'true || die' || rc=1
   mutate test_lazy_build    'if [ -z "$(docker image ls -q "$IMAGE" 2>/dev/null)" ]; then
@@ -830,6 +940,7 @@ run_mutants() {
   mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
   mutate test_config_file_outside_state_dir '[ -s "$A_CFG_PATH" ] || printf' 'printf' || rc=1
   mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
+  mutate test_update_check  $'if [ "$A_SRC" = github ]; then\n      # the redirect' $'if false; then\n      # the redirect' || rc=1
   mutate test_update_check  '${AGENT_POD_NO_UPDATE:-${!A_LEGACY_NO_UPDATE:-}}' '${AGENT_POD_NO_UPDATE:-${CLAUDE_POD_NO_UPDATE:-${COPILOT_POD_NO_UPDATE:-}}}' || rc=1
   mutate test_update_check  "grep -oE -m1 '[0-9]+\\.[0-9]+\\.[0-9]+'" "sed -n 's/^\\([0-9][0-9.]*\\).*/\\1/p'" || rc=1
   mutate test_stdin_reaches_pod '"${RUN_CMD[@]}" <&0 &' '"${RUN_CMD[@]}" &' || rc=1
@@ -870,6 +981,11 @@ run_mutants() {
   mutate test_base_signature '    printf '"'"'%s  Not verified: %s is not the default repository.%s\n'"'"' "$DIM" "$BASE_REPO" "$RESET"
     [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return' '    return 0' install.sh || rc=1
   mutate test_base_signature 'if [ "$BASE_REPO" != "$DEFAULT_BASE_REPO" ]; then' 'if false; then' install.sh || rc=1
+  mutate test_install_agent_source 'if [ "$src" = github ]; then version="${version#v}"; channel_label="${channel_label#v}"; fi' ':' install.sh || rc=1
+  mutate test_install_agent_source '--build-arg "AGENT_SRC=$src" ' '' install.sh || rc=1
+  mutate test_install_agent_source $'if [ "$src" = github ]; then\n      resolved=' $'if false; then\n      resolved=' install.sh || rc=1
+  mutate test_agent_install_layer '[0-9]*) rel="download/v${AGENT_VERSION}" ;; *) rel="latest/download" ;;' '*) rel="download/v${AGENT_VERSION}" ;;' Dockerfile || rc=1
+  mutate test_agent_install_layer 'if [ "${AGENT_SRC}" = github ]; then' 'if false; then' Dockerfile || rc=1
   mutate test_agent_install_layer ' && ${AGENT} --version && exit 0;' ' && exit 0;' Dockerfile || rc=1
   mutate test_agent_install_layer 'for i in 1 2 3; do' 'for i in 1; do' Dockerfile || rc=1
   mutate test_agent_install_layer $'    done; \\\n    exit 1' $'    done; \\\n    exit 0' Dockerfile || rc=1

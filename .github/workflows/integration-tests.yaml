@@ -1,6 +1,6 @@
 name: Integration tests
 
-# Runs tests/integration.sh against a real Docker daemon: the pod images (Claude Code and Copilot CLI) built from the Dockerfile, the pinned
+# Runs tests/integration.sh against a real Docker daemon: the pod images (Claude Code, Copilot CLI and goose) built from the Dockerfile, the pinned
 # rootless sidecar, DOCKER=1 sessions, the cache, TLS and signals. This is what tells an update of a tooling
 # image (docker CLI, DIND sidecar, node base, yq) from a broken one; the stub tests need no daemon and cannot.
 on:
