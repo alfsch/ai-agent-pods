@@ -126,7 +126,7 @@ for a in claude copilot goose; do
 done
 check "agent-pod:claude does not carry Copilot CLI" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:claude copilot
 check "agent-pod:copilot does not carry Claude Code" bash -c 'docker run --rm "$0" sh -c "command -v $1"; [ $? = 127 ]' agent-pod:copilot claude
-check "agent-pod:goose does not carry Claude Code or Copilot CLI" bash -c 'for c in claude copilot; do docker run --rm "$0" sh -c "command -v $c" && exit 1; done; exit 0' agent-pod:goose
+check "agent-pod:goose does not carry Claude Code or Copilot CLI" bash -c 'for c in claude copilot; do docker run --rm "$0" sh -c "command -v $c"; [ $? = 127 ] || exit 1; done' agent-pod:goose
 
 section "pinned sidecar image: the contract the launcher relies on"
 PIN="$(grep -o 'docker:[0-9a-z.-]*-dind-rootless@sha256:[0-9a-f]\{64\}' "$LAUNCHER" | head -n1)"
@@ -201,9 +201,11 @@ check "the other agent reuses the same cache" grep -q "reusing $CACHE_VOL" "$WOR
 if [ -n "$CACHE_IMG" ] && [ "$rc" = 0 ]; then ok "the image pulled by the first agent is in the cache of the other"; else fail "the image pulled by the first agent is in the cache of the other"; tail -n 10 "$WORK/cache3.out" | indent; fi
 AGENT=copilot run_launcher DOCKER=1 -- sh -c 'copilot --version && docker info >/dev/null' >"$WORK/copilot.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then ok "a Copilot CLI session with DOCKER=1 runs"; else fail "a Copilot CLI session with DOCKER=1 runs (exit $rc)"; tail -n 20 "$WORK/copilot.out" | indent; fi
-# goose keeps config, data and state in one mounted dir: everything it would write lands in ~/.goose-pod on the host.
-AGENT=goose run_launcher -- sh -c 'goose info >/dev/null 2>&1; mkdir -p "$XDG_STATE_HOME/goose" "$XDG_CONFIG_HOME/goose" && echo s > "$XDG_STATE_HOME/goose/probe" && echo c > "$XDG_CONFIG_HOME/goose/probe"; ls -A /home/agent-pod' >"$WORK/goose.out" 2>&1; rc=$?
-check "a goose session writes its state and config into the host state dir" bash -c '[ "$1" = 0 ] && [ "$(cat "$2/state/goose/probe")" = s ] && [ "$(cat "$2/config/goose/probe")" = c ]' x "$rc" "$WORK/home/.goose-pod"
+# goose keeps config, data and state in one mounted dir: what goose itself writes (`goose info` logs to its state dir)
+# lands in ~/.goose-pod on the host, not in the throwaway home. Its plugins dir is a second mount that the host uid can write.
+AGENT=goose run_launcher -- sh -c 'goose info && touch "$HOME/.agents/plugins/probe" && cat "$HOME/.agents/AGENTS.md" >/dev/null' >"$WORK/goose.out" 2>&1; rc=$?
+check "a goose session succeeds and goose writes its log into the host state dir" bash -c '[ "$1" = 0 ] && [ -n "$(find "$2/state/goose/logs" -type f 2>/dev/null | head -n1)" ]' x "$rc" "$WORK/home/.goose-pod"
+check "a goose session can write ~/.agents/plugins, which persists on the host" test -e "$WORK/config/agent-pod/goose-plugins/probe"
 check "a goose session has no config file mount and leaves ~/.config/agent-pod without goose.json" bash -c '[ ! -e "$1/agent-pod/goose.json" ]' x "$WORK/config"
 
 section "a running cache session: exclusivity, TLS, SIGTERM"

@@ -18,9 +18,11 @@ ARG AGENT=
 # it runs. So the layer runs the agent and, if that fails, installs again (up to three tries) instead of letting a
 # half-installed image reach the verification at the end of install.sh. AGENT is the name of the binary.
 # A github agent is the musl build, which is statically linked (it runs on any base); a truncated download makes tar fail.
+# A version that install.sh could not resolve (still "latest") is fetched from the latest release.
 RUN for i in 1 2 3; do \
       if [ "${AGENT_SRC}" = github ]; then \
-        curl -fsSL "https://github.com/${AGENT_PKG}/releases/download/v${AGENT_VERSION}/${AGENT}-$(uname -m)-unknown-linux-musl.tar.gz" \
+        case "${AGENT_VERSION}" in [0-9]*) rel="download/v${AGENT_VERSION}" ;; *) rel="latest/download" ;; esac; \
+        curl -fsSL "https://github.com/${AGENT_PKG}/releases/${rel}/${AGENT}-$(uname -m)-unknown-linux-musl.tar.gz" \
           | tar -xz -C /usr/local/bin ./${AGENT}; \
       else \
         npm install -g ${AGENT_PKG}@${AGENT_VERSION}; \

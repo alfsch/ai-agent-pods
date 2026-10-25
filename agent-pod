@@ -71,6 +71,8 @@ fi
 #                          existing logins keep working
 #   A_CFG_DIR / A_CFG_FILE where the agent reads its state in HOME, and its main config file (a sibling of that dir;
 #                          empty when the agent keeps everything inside A_CFG_DIR)
+#   A_EXTRA_DIR            a second dir in HOME that the agent writes and that must persist (empty: none); kept in
+#                          ~/.config/agent-pod/<agent>-<last part of the dir>, outside the state dir for the same reason as the config file
 #   A_NOUPDATE             NAME=value that turns off the agent's own self-updater (empty: it has none)
 #   A_ENV                  further NAME=value pairs set in the pod
 #   A_FORWARD              host variables that are forwarded when set (token login)
@@ -78,23 +80,25 @@ case "$AGENT" in
   claude)
     A_NAME="Claude Code"; A_BIN=claude; A_SRC=npm; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
     A_VERSION_VAR=CLAUDE_CODE_VERSION; A_LEGACY_NO_UPDATE=CLAUDE_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json
+    A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json; A_EXTRA_DIR=
     A_NOUPDATE=DISABLE_AUTOUPDATER=1; A_ENV=
     A_FORWARD=
     ;;
   copilot)
     A_NAME="Copilot CLI"; A_BIN=copilot; A_SRC=npm; A_PKG=@github/copilot; A_CHANNEL=latest
     A_VERSION_VAR=COPILOT_CLI_VERSION; A_LEGACY_NO_UPDATE=COPILOT_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json
+    A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json; A_EXTRA_DIR=
     A_NOUPDATE=COPILOT_AUTO_UPDATE=false; A_ENV=
     A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"
     ;;
   goose)
     # goose keeps config, data and state in three XDG dirs, so they are pointed into one mounted dir; there is no
-    # separate config file. No keyring in the pod: secrets go to secrets.yaml there. It has no self-updater.
+    # separate config file. No keyring in the pod: secrets go to secrets.yaml there. It has no self-updater. Its
+    # plugins go to ~/.agents/plugins whatever the XDG variables say, and ~/.agents (with the baked AGENTS.md) is not
+    # writable for the host uid, so that one dir is mounted from the host.
     A_NAME="goose"; A_BIN=goose; A_SRC=github; A_PKG=aaif-goose/goose; A_CHANNEL=latest
     A_VERSION_VAR=GOOSE_VERSION; A_LEGACY_NO_UPDATE=AGENT_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=
+    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=; A_EXTRA_DIR=.agents/plugins
     A_NOUPDATE=
     A_ENV="XDG_CONFIG_HOME=/home/agent-pod/.goose/config XDG_DATA_HOME=/home/agent-pod/.goose/data XDG_STATE_HOME=/home/agent-pod/.goose/state GOOSE_DISABLE_KEYRING=1"
     A_FORWARD="GOOSE_PROVIDER GOOSE_MODEL ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY"
@@ -185,6 +189,9 @@ if [ -n "$A_CFG_FILE" ]; then
   # before `docker run`. The agent treats an empty file as a JSON parse error, not as "no config", so seed it with {}.
   [ -s "$A_CFG_PATH" ] || printf '{}' > "$A_CFG_PATH"
 fi
+
+A_EXTRA_PATH="$A_CFG_HOME/$AGENT-${A_EXTRA_DIR##*/}"
+if [ -n "$A_EXTRA_DIR" ]; then mkdir -p "$A_EXTRA_PATH"; chmod 700 "$A_CFG_HOME" "$A_EXTRA_PATH"; fi
 
 # Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
 # (which can contain code, file contents, and command output the agent saw); on multi-user hosts the
@@ -500,6 +507,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   -w "$PWD" \
   -v "$A_STATE_DIR:/home/agent-pod/$A_CFG_DIR" \
   ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
+  ${A_EXTRA_DIR:+-v "$A_EXTRA_PATH:/home/agent-pod/$A_EXTRA_DIR"} \
   "$IMAGE" "$@")
 
 # Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay

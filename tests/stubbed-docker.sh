@@ -511,6 +511,11 @@ test_agent_flags() {   # per agent: its state dir and config file, its self-upda
   logged " -e XDG_CONFIG_HOME=/home/agent-pod/.goose/config -e XDG_DATA_HOME=/home/agent-pod/.goose/data -e XDG_STATE_HOME=/home/agent-pod/.goose/state -e GOOSE_DISABLE_KEYRING=1 -e GOOSE_PROVIDER -e GOOSE_MODEL -e ANTHROPIC_API_KEY "
   not_logged 'DISABLE_AUTOUPDATER'; not_logged 'COPILOT_'; not_logged 'GITHUB_TOKEN'; not_logged 'GH_TOKEN'; not_logged 'goose\.json'; not_logged ' -e  '
   [ ! -e "$H/config/agent-pod/goose.json" ] && [ -d "$H/.goose-pod" ] && [ ! -e "$H/.claude-pod" ] || fail "state of the wrong agent, or a config file for goose"
+  # ~/.agents/plugins is not writable in the image, so it is a mount from outside the pod-writable state dir
+  logged " -v $H/config/agent-pod/goose-plugins:/home/agent-pod/.agents/plugins "
+  [ -d "$H/config/agent-pod/goose-plugins" ] || fail "the plugins dir of goose was not created on the host"
+  setup_case; AGENT=claude launch -- true
+  not_logged 'plugins'; [ ! -e "$H/config/agent-pod/claude-plugins" ] || fail "a plugins dir for claude"
 }
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
@@ -770,6 +775,9 @@ test_agent_install_layer() {   # the install layer of Dockerfile runs the agent 
   # a github agent comes from the musl release tarball of its repository, not from npm
   layer AGENT_SRC=github AGENT_PKG=o/r AGENT_VERSION=1.2.3 AGENT=claude; rc_is 0; not_logged '^npm'
   logged '^curl -fsSL https://github.com/o/r/releases/download/v1.2.3/claude-x86_64-unknown-linux-musl.tar.gz$'; logged '^tar -xz -C /usr/local/bin ./claude$'
+  # a version that install.sh could not resolve stays "latest" and must not become a tag "vlatest"
+  layer AGENT_SRC=github AGENT_PKG=o/r AGENT_VERSION=latest AGENT=claude; rc_is 0
+  logged '^curl -fsSL https://github.com/o/r/releases/latest/download/claude-x86_64-unknown-linux-musl.tar.gz$'; not_logged 'vlatest'
   layer AGENT_SRC=github AGENT_FAILS=1; rc_is 0; [ "$(grep -c '^curl' "$STUB_LOG")" = 2 ] || fail "a github install that did not start was not repeated"
   layer AGENT_SRC=github CURL_FAILS=99; [ "$RC" != 0 ] || fail "a github install whose download fails succeeded"
   # it never starts: three tries, then the build fails
@@ -866,6 +874,8 @@ run_mutants() {
   mutate test_agent_flags   ' GOOSE_DISABLE_KEYRING=1"' '"' || rc=1
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
+  mutate test_agent_flags   '${A_EXTRA_DIR:+-v "$A_EXTRA_PATH:/home/agent-pod/$A_EXTRA_DIR"}' '' || rc=1
+  mutate test_agent_flags   'if [ -n "$A_EXTRA_DIR" ]; then mkdir -p "$A_EXTRA_PATH"' 'if false; then mkdir -p "$A_EXTRA_PATH"' || rc=1
   mutate test_agent_flags   $'if [ -n "$A_CFG_FILE" ]; then\n  mkdir' $'if true; then\n  mkdir' || rc=1
   mutate test_agent_flags   '[ -z "$A_NOUPDATE" ] || AGENT_ENV' 'true; AGENT_ENV' || rc=1
   mutate test_cache_shared_between_agents '_hash="$(' '_hash="$AGENT$(' || rc=1
@@ -921,6 +931,7 @@ run_mutants() {
   mutate test_install_agent_source 'if [ "$src" = github ]; then version="${version#v}"; channel_label="${channel_label#v}"; fi' ':' install.sh || rc=1
   mutate test_install_agent_source '--build-arg "AGENT_SRC=$src" ' '' install.sh || rc=1
   mutate test_install_agent_source $'if [ "$src" = github ]; then\n      resolved=' $'if false; then\n      resolved=' install.sh || rc=1
+  mutate test_agent_install_layer '[0-9]*) rel="download/v${AGENT_VERSION}" ;; *) rel="latest/download" ;;' '*) rel="download/v${AGENT_VERSION}" ;;' Dockerfile || rc=1
   mutate test_agent_install_layer 'if [ "${AGENT_SRC}" = github ]; then' 'if false; then' Dockerfile || rc=1
   mutate test_agent_install_layer ' && ${AGENT} --version && exit 0;' ' && exit 0;' Dockerfile || rc=1
   mutate test_agent_install_layer 'for i in 1 2 3; do' 'for i in 1; do' Dockerfile || rc=1
