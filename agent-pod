@@ -126,6 +126,7 @@ _sec="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || die "Docker
 # the whole launch uses the rootful daemon at the usual socket, if there is one that answers.
 if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)
   ROOTFUL_HOST=unix:///var/run/docker.sock
+  unset DOCKER_CONTEXT   # it wins over DOCKER_HOST: a set context would send the probe and the launch back to the rootless daemon
   _sec2="$(DOCKER_HOST="$ROOTFUL_HOST" docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || _sec2=name=rootless   # no answer counts like a rootless one
   case "$_sec2" in *name=rootless*) die "DOCKER=1 does not work on a rootless Docker daemon, and no rootful daemon answers at $ROOTFUL_HOST. Start without DOCKER=1, or see 'Using Docker inside the pod' in the README." ;; esac
   export DOCKER_HOST="$ROOTFUL_HOST"; _sec="$_sec2"

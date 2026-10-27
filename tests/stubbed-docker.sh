@@ -53,7 +53,8 @@ echo "$1 ${DOCKER_HOST:-}" >> "$STUB_DIR/hosts"
 case "$1" in
   info)
     # STUB_ROOTLESS=1: the default daemon is rootless; STUB_ROOTFUL_SOCK=1: there is a rootful one at /var/run/docker.sock
-    if [ "${DOCKER_HOST:-}" = unix:///var/run/docker.sock ]; then
+    # a set DOCKER_CONTEXT wins over DOCKER_HOST, as in the real client: the default daemon answers
+    if [ "${DOCKER_HOST:-}" = unix:///var/run/docker.sock ] && [ -z "${DOCKER_CONTEXT:-}" ]; then
       [ -n "${STUB_ROOTFUL_SOCK:-}" ] || exit 1
       [[ "$*" != *SecurityOptions* ]] || echo "[name=seccomp,profile=builtin name=cgroupns]"; exit 0
     fi
@@ -286,9 +287,9 @@ test_plain_exec() {   # without DOCKER=1 the launcher only execs docker run (inv
   logged "^run --rm .*agent-pod:$AGENT true\$"
 }
 test_rootless_user() {   # rootless Docker maps the host user to container root: the pod must run as 0:0 to read its state dir
-  setup_case; launch STUB_UID=1001 STUB_GID=1001 --
+  setup_case; AGENT=claude launch STUB_UID=1001 STUB_GID=1001 --
   rc_is 0; logged '^run --rm .*--user 1001:1001 '; not_logged 'IS_SANDBOX'
-  setup_case; launch STUB_ROOTLESS=1 STUB_UID=1001 STUB_GID=1001 --
+  setup_case; AGENT=claude launch STUB_ROOTLESS=1 STUB_UID=1001 STUB_GID=1001 --
   rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'user 1001'
   logged '^run --rm .* -e IS_SANDBOX=1 '   # Claude Code refuses --dangerously-skip-permissions as root, the pod is the sandbox
   setup_case; AGENT=copilot launch STUB_ROOTLESS=1 --; rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'IS_SANDBOX'
@@ -299,6 +300,8 @@ test_rootless_default_daemon() {   # DOCKER=1 on a rootless default daemon: ever
   rc_is 0; in_out 'rootful daemon at unix:///var/run/docker.sock'
   logged '^run -d --privileged '; logged '^run --rm .*--user 1001:1001 '; not_logged 'user 0:0'
   ! tail -n +2 "$STUB_DIR/hosts" | grep -qvE " $ok\$" || fail "a docker call did not go to the rootful daemon"
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 DOCKER_CONTEXT=rootless -- true   # the context must not hide the rootful daemon
+  rc_is 0; in_out 'rootful daemon at unix:///var/run/docker.sock'
   setup_case; launch DOCKER=1 STUB_ROOTLESS=1 -- true
   [ "$RC" != 0 ] || fail "started on a rootless daemon without a rootful one"
   in_out 'does not work on a rootless Docker daemon'; not_logged '^run '
@@ -901,6 +904,7 @@ run_mutants() {
   mutate test_rootless_user 'A_FORWARD=; A_ROOT_ENV=IS_SANDBOX=1' 'A_FORWARD=; A_ROOT_ENV=' || rc=1
   mutate test_rootless_user 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=' 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=IS_SANDBOX=1' || rc=1
   mutate test_rootless_default_daemon 'export DOCKER_HOST="$ROOTFUL_HOST"; ' '' || rc=1
+  mutate test_rootless_default_daemon $'  unset DOCKER_CONTEXT ' ' #' || rc=1
   mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
   mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
   mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1
