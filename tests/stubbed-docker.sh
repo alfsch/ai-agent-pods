@@ -10,6 +10,8 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
+UNINSTALLER="${UNINSTALLER:-$ROOT/uninstall.sh}"
+ITEST="${ITEST:-$ROOT/tests/integration.sh}"
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
@@ -49,8 +51,17 @@ AGENT="${AGENT-claude}"
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
+echo "$1 ${DOCKER_HOST:-}" >> "$STUB_DIR/hosts"
 case "$1" in
-  info) exit 0 ;;
+  info)
+    # STUB_ROOTLESS=1: the default daemon is rootless; STUB_ROOTFUL_SOCK=1: there is a rootful one at /var/run/docker.sock
+    # a set DOCKER_CONTEXT wins over DOCKER_HOST, as in the real client: the default daemon answers
+    if [ "${DOCKER_HOST:-}" = unix:///var/run/docker.sock ] && [ -z "${DOCKER_CONTEXT:-}" ]; then
+      [ -n "${STUB_ROOTFUL_SOCK:-}" ] || exit 1
+      # STUB_ROOTFUL_ROOTLESS=1: that socket answers, but it is a rootless daemon too
+      [[ "$*" != *SecurityOptions* ]] || echo "[name=seccomp,profile=builtin${STUB_ROOTFUL_ROOTLESS:+ name=rootless} name=cgroupns]"; exit 0
+    fi
+    [[ "$*" != *SecurityOptions* ]] || echo "[name=seccomp,profile=builtin${STUB_ROOTLESS:+ name=rootless} name=cgroupns]"; exit 0 ;;
   image)
     # image labels, for the update check
     if [ "$2" = inspect ]; then
@@ -75,6 +86,7 @@ case "$1" in
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
   volume)
     case "$2" in
+      ls) [ -z "${STUB_VOLUMES:-}" ] || echo "$STUB_VOLUMES"; exit 0 ;;   # the volumes the daemon lists (one name)
       inspect) [ -n "${STUB_VOLUME_EXISTS:-}" ]; exit ;;
       rm)
         if [[ " ${STUB_RM_INUSE:-} " == *" $3 "* ]]; then
@@ -208,7 +220,7 @@ setup_case() {
   export STUB_LOG="$CASE/docker.log" STUB_DIR="$CASE/stub"; mkdir -p "$STUB_DIR"; : > "$STUB_LOG"
   HASH="$(cd "$PROJ" && { pwd -P; echo 1000:1000; } | sha16)"   # the stub reports uid and gid 1000
 }
-launch_env() { cd "$PROJ" && HOME="$H" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
+launch_env() { cd "$PROJ" && unset DOCKER_HOST DOCKER_CONTEXT && HOME="$H" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
 launch() {   # launch <env VAR=...>... -- args   (foreground; sets RC)
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
   RC=0; (launch_env env ${envs[@]+"${envs[@]}"} timeout 60 "$LAUNCHER" ${AGENT:+"$AGENT"} "$@" </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
@@ -278,6 +290,69 @@ test_plain_exec() {   # without DOCKER=1 the launcher only execs docker run (inv
   not_logged 'network|volume|--init|--privileged'
   logged "^run --rm .*agent-pod:$AGENT true\$"
 }
+test_rootless_user() {   # rootless Docker maps the host user to container root: the pod must run as 0:0 to read its state dir
+  setup_case; AGENT=claude launch STUB_UID=1001 STUB_GID=1001 --
+  rc_is 0; logged '^run --rm .*--user 1001:1001 '; not_logged 'IS_SANDBOX'
+  setup_case; AGENT=claude launch STUB_ROOTLESS=1 STUB_UID=1001 STUB_GID=1001 --
+  rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'user 1001'
+  logged '^run --rm .* -e IS_SANDBOX=1 '   # Claude Code refuses --dangerously-skip-permissions as root, the pod is the sandbox
+  setup_case; AGENT=copilot launch STUB_ROOTLESS=1 --; rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'IS_SANDBOX'
+}
+test_rootless_default_daemon() {   # DOCKER=1 on a rootless default daemon: everything goes to the rootful one, or it stops
+  local ok=unix:///var/run/docker.sock
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_UID=1001 STUB_GID=1001 -- true
+  rc_is 0; in_out 'rootful daemon at unix:///var/run/docker.sock'
+  logged '^run -d --privileged '; logged '^run --rm .*--user 1001:1001 '; not_logged 'user 0:0'
+  ! tail -n +2 "$STUB_DIR/hosts" | grep -qvE " $ok\$" || fail "a docker call did not go to the rootful daemon"
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 DOCKER_CONTEXT=rootless -- true   # the context must not hide the rootful daemon
+  rc_is 0; in_out 'rootful daemon at unix:///var/run/docker.sock'
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 -- true
+  [ "$RC" != 0 ] || fail "started on a rootless daemon without a rootful one"
+  in_out 'does not work on a rootless Docker daemon'; not_logged '^run '
+  setup_case; launch STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 -- true     # without DOCKER=1 the default daemon stays
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon without DOCKER=1"
+  setup_case; launch DOCKER=1 STUB_ROOTFUL_SOCK=1 -- true            # rootful default daemon: nothing changes
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon although the default is rootful"
+}
+test_harness_ignores_inherited_daemon() {   # the caller's DOCKER_HOST/DOCKER_CONTEXT must not steer the stub cases
+  setup_case; DOCKER_HOST=unix:///var/run/docker.sock DOCKER_CONTEXT=rootless launch --
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "the launcher saw the caller's DOCKER_HOST"
+}
+test_uninstall_two_daemons() {   # a rootless default daemon with a rootful fallback: both lose their images and volumes
+  local vol=agent-pod-docker-0123456789abcdef n
+  setup_case; mkdir -p "$H/.claude-pod" "$H/state/agent-pod/caches"
+  RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'rootful fallback'
+  grep -qxF 'volume ' "$STUB_DIR/hosts" && grep -qxF 'volume unix:///var/run/docker.sock' "$STUB_DIR/hosts" \
+    || fail "volumes were not listed on both daemons"
+  grep -qxF 'rmi unix:///var/run/docker.sock' "$STUB_DIR/hosts" || fail "no image removed on the rootful daemon"
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 2 ] || fail "the cache volume was removed $n times, expected once per daemon"
+  [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/state/agent-pod" ] || fail "host state was not removed"
+  setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "touched a second daemon although the default is rootful"
+  ! grep -q 'No rootful Docker daemon answers' "$CASE/out" "$CASE/err" || fail "warned about a missing rootful daemon on a rootful default"
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "rootful default: the cache volume was removed $n times, expected once"
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
+  rc_is 0; ! grep -q 'rmi unix:///var/run' "$STUB_DIR/hosts" || fail "removed images on a daemon that does not answer"
+  in_out 'No rootful Docker daemon answers'   # the leftovers are reported, not silently skipped
+  in_out 'run: env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock ./uninstall.sh'   # a set context would win over DOCKER_HOST
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "no rootful daemon: the cache volume was removed $n times, expected once"
+}
+test_integration_daemons() {   # tests/integration.sh sends its DOCKER=1 checks to the daemon the launcher uses
+  local show=(--show-daemons)
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'use: the rootful daemon at unix:///var/run/docker.sock'
+  in_out 'sd runs: env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker$'
+  grep -qxF 'version unix:///var/run/docker.sock' "$STUB_DIR/hosts" || fail "an sd call did not reach the rootful daemon"
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_ROOTFUL_ROOTLESS=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'no rootful one answers'; in_out 'sd runs:  docker$'   # an answering socket that is rootless is no fallback
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'no rootful one answers'
+  setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
+  rc_is 0; in_out 'use: the default daemon'; in_out 'sd runs:  docker$'; grep -qxF 'version ' "$STUB_DIR/hosts" || fail "an sd call did not reach the default daemon"; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "probed a second daemon although the default is rootful"
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 DOCKER_CONTEXT=rootless "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'use: the rootful daemon'   # a context of the caller must not hide the rootful daemon
+}
 test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cleanup
   setup_case; launch DOCKER=1 STUB_POD_EXIT=7 -- true
   rc_is 7
@@ -314,9 +389,12 @@ test_cache_reuse() {
 }
 test_cache_conflict() {   # name already taken: refuse, point at the leftover, touch nothing of the other session
   setup_case; launch DOCKER=1 DOCKER_CACHE=1 STUB_NAME_CONFLICT=1 -- true
-  rc_is 1; in_out "docker rm -f agent-pod-dind-cache-$HASH"
+  rc_is 1; in_out "docker rm -f agent-pod-dind-cache-$HASH"; ! grep -q 'DOCKER_HOST=' "$CASE/err" "$CASE/out" || fail "the hint names a daemon without a fallback"
   not_logged '^run --rm'; not_logged '^(stop|rm -f -v)'
   logged '^network rm '
+  # after the fallback the command typed in the user's shell must reach the rootful daemon, not the rootless default
+  setup_case; launch DOCKER=1 DOCKER_CACHE=1 STUB_NAME_CONFLICT=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 -- true
+  rc_is 1; in_out "env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker rm -f agent-pod-dind-cache-$HASH"
 }
 test_host_uid() {   # Linux, uid other than 1000: derived sidecar image for that uid, built once, before the sidecar
   setup_case; launch DOCKER=1 STUB_UID=1001 STUB_GID=1002 -- true
@@ -854,7 +932,7 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -867,6 +945,28 @@ mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in 
 run_mutants() {
   local rc=0
   mutate test_sequence      $'  ${DOCKER:+--init} \\\n' '' || rc=1
+  mutate test_rootless_user 'POD_USER=0:0' 'POD_USER="$(id -u):$(id -g)"' || rc=1
+  mutate test_rootless_user '[ "${POD_USER%%:*}" != 0 ] || [ -z "$A_ROOT_ENV" ]' 'true' || rc=1
+  mutate test_rootless_user 'A_FORWARD=; A_ROOT_ENV=IS_SANDBOX=1' 'A_FORWARD=; A_ROOT_ENV=' || rc=1
+  mutate test_rootless_user 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=' 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=IS_SANDBOX=1' || rc=1
+  mutate test_rootless_default_daemon 'export DOCKER_HOST="$ROOTFUL_HOST"; ' '' || rc=1
+  mutate test_rootless_default_daemon $'  unset DOCKER_CONTEXT ' ' #' || rc=1
+  mutate test_uninstall_two_daemons 'DAEMONS+=(unix:///var/run/docker.sock)' 'true' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons '  if [[ "$_sec2" == *name=rootless* ]]; then' '  if false; then' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'if [[ "$_sec" == *name=rootless* ]]; then' 'if true; then' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'docker volume rm $_vols >/dev/null 2>&1 ||' 'true ||' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'No rootful Docker daemon answers at' 'Rootful daemon missing at' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'run: env -u DOCKER_CONTEXT DOCKER_HOST=' 'run: DOCKER_HOST=' uninstall.sh || rc=1
+  mutate test_integration_daemons 'SD_ENV=(env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost"); ' 'true; ' tests/integration.sh || rc=1
+  mutate test_integration_daemons 'sd() { ${SD_ENV[@]+"${SD_ENV[@]}"} docker "$@"; }' 'sd() { docker "$@"; }' tests/integration.sh || rc=1
+  mutate test_cache_conflict 'a leftover from a killed session: $DOCKER_HINT rm -f $DIND_NAME}"' 'a leftover from a killed session: docker rm -f $DIND_NAME}"' || rc=1
+  mutate test_cache_conflict '  DOCKER_HINT="env -u DOCKER_CONTEXT DOCKER_HOST=$ROOTFUL_HOST docker"' '  DOCKER_HINT=docker' || rc=1
+  mutate test_integration_daemons 'env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost" docker info' 'DOCKER_HOST="$_sdhost" docker info' tests/integration.sh || rc=1
+  mutate test_integration_daemons '&& ! grep -q name=rootless <<<"$_sdsec"' '&& true' tests/integration.sh || rc=1
+  mutate test_integration_daemons "if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q name=rootless; then" 'if true; then' tests/integration.sh || rc=1
+  mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
+  mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
+  mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1
   mutate test_sequence      'docker run -d --privileged --init \' 'docker run -d --privileged \' || rc=1
   mutate test_sequence      $'  docker network rm "$DIND_NET" >/dev/null 2>&1 || true\n' '' || rc=1
   mutate test_option_validation 'die "$_v must be 1 (or unset), not '"'"'${!_v}'"'"'."' 'true' || rc=1

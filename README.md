@@ -133,6 +133,7 @@ The launcher mounts it read-only as `~/.gitconfig`. For another identity per age
 
 `DOCKER=1` starts a separate **rootless Docker-in-Docker sidecar** (a pinned `docker:<major>-dind-rootless` image) on a private per-run network and points the pod's `docker` CLI (with Compose and Buildx) at it. Only the sidecar is `--privileged`; the pod keeps all its hardening (no capabilities, `no-new-privileges`, default seccomp). The host's Docker socket is never mounted. The daemon accepts only a per-run client certificate (mutual TLS). Sidecar, network and certificates are removed when the session ends. Use it on projects you trust: an escape from the privileged sidecar would be more serious than from the default pod.
 
+- If your default Docker daemon is rootless (see "Rootless Docker" below), `DOCKER=1` needs a rootful daemon at `unix:///var/run/docker.sock`: the sidecar cannot run inside a rootless daemon, which maps too few ids and would not let the sidecar write the project folder. The launcher then uses that daemon for the whole session and prints a notice; if none answers, it stops. Your user needs access to the socket, which is root-equivalent on the host.
 - On Linux the rootless daemon needs unprivileged user namespaces. Ubuntu 24.04+ restricts them through AppArmor; the sidecar then fails with `rootlesskit ... operation not permitted`. Check `sysctl kernel.apparmor_restrict_unprivileged_userns`; if it is `1`, set it to `0` (`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, permanent via `/etc/sysctl.d/`). This loosens the restriction machine-wide.
 - On Linux with a host uid other than 1000 the launcher builds a small sidecar image once (`agent-pod-dind:*`) whose user has your uid, so inner containers running as root can write to the project as you. Inner containers running as another user cannot, unless the folder is group-writable.
 - The project folder is mounted into the sidecar at the same path, so `docker run -v "$PWD:/app" ...` works. The rootless daemon has no cgroups, so `docker run --memory/--cpus` inside has no effect; `MEMORY`, `CPUS` and `PIDS` limit the sidecar as a whole.
@@ -158,9 +159,11 @@ Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + 
 - **`agent-pod`**: one `docker run` that mounts your current directory and the agent's state dir, and nothing else of your machine. Run as `claude-pod` / `copilot-pod` / `goose-pod` it is the same script.
 - **`Dockerfile.base`**: the tools above, published as the base image by `.github/workflows/publish-base.yaml`. **`Dockerfile`**: the agent on top of it; `AGENT_PKG`/`AGENT_VERSION` build args select the agent.
 - **`install.sh`**: checks Docker and builds the images; it does not touch any system path.
-- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation.
+- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation. With a rootless default daemon it also cleans the rootful daemon at `/var/run/docker.sock`, where `DOCKER=1` sessions run (see "Using Docker inside the pod").
 
 The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` and `--rm`, and a process cap.
+
+**Rootless Docker.** A rootless daemon maps your host user to container root, so the state dir you mount shows up as `root:root` (mode 700) and a pod running as your uid could not read it (symptom: "credentials could not be saved"). The launcher detects a rootless daemon (`docker info` shows `rootless`) and runs the pod as uid 0 instead, which is still you on the host; capabilities stay dropped. Two consequences: files the pod creates belong to you as usual, and the agent runs as root inside the container. Claude Code refuses `--dangerously-skip-permissions` as root, so in that case the launcher sets `IS_SANDBOX=1` (its signal that it already runs in a sandbox, which the pod is); other agents get nothing. `DOCKER=1` is covered in the section above.
 
 ### What is and isn't isolated
 
