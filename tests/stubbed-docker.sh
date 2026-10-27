@@ -335,6 +335,7 @@ test_uninstall_two_daemons() {   # a rootless default daemon with a rootful fall
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
   rc_is 0; ! grep -q 'rmi unix:///var/run' "$STUB_DIR/hosts" || fail "removed images on a daemon that does not answer"
   in_out 'No rootful Docker daemon answers'   # the leftovers are reported, not silently skipped
+  in_out 'run: env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock ./uninstall.sh'   # a set context would win over DOCKER_HOST
   n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "no rootful daemon: the cache volume was removed $n times, expected once"
 }
 test_integration_daemons() {   # tests/integration.sh sends its DOCKER=1 checks to the daemon the launcher uses
@@ -955,6 +956,7 @@ run_mutants() {
   mutate test_uninstall_two_daemons 'if [[ "$_sec" == *name=rootless* ]]; then' 'if true; then' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'docker volume rm $_vols >/dev/null 2>&1 ||' 'true ||' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'No rootful Docker daemon answers at' 'Rootful daemon missing at' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'run: env -u DOCKER_CONTEXT DOCKER_HOST=' 'run: DOCKER_HOST=' uninstall.sh || rc=1
   mutate test_integration_daemons 'SD_ENV=(env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost"); ' 'true; ' tests/integration.sh || rc=1
   mutate test_integration_daemons 'sd() { ${SD_ENV[@]+"${SD_ENV[@]}"} docker "$@"; }' 'sd() { docker "$@"; }' tests/integration.sh || rc=1
   mutate test_cache_conflict 'a leftover from a killed session: $DOCKER_HINT rm -f $DIND_NAME}"' 'a leftover from a killed session: docker rm -f $DIND_NAME}"' || rc=1
