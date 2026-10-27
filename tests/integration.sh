@@ -7,6 +7,10 @@
 # Needs: Docker, the images `agent-pod:claude`, `agent-pod:copilot` and `agent-pod:goose` (./install.sh builds them) and, for the rootless sidecar, unprivileged
 # user namespaces (on Ubuntu 24.04+: kernel.apparmor_restrict_unprivileged_userns=0). Network access to pull the
 # inner test image (ITEST_INNER_IMAGES, tried in order). Only exit codes and results are asserted, never timings.
+# With a rootless default daemon the launcher runs DOCKER=1 sessions on the rootful daemon at /var/run/docker.sock; the
+# script finds it itself (tests/integration.sh --show-daemons prints what it found), checks sidecars, caches and leaks
+# there and keeps the pod image and plain sessions on the default daemon. It needs access to that socket and the
+# sysctl above on its host. Without a rootful daemon the DOCKER=1 checks fail, as the launcher refuses to start them.
 # The leak check compares resource names before and after, so it assumes that no other agent-pod session starts on
 # the same daemon while the tests run (sessions that end do not matter).
 # The project folder must be visible to the Docker daemon: set ITEST_TMPDIR (default $TMPDIR or /tmp) to a
@@ -24,11 +28,29 @@ PASS=0; FAIL=0
 ok()   { PASS=$((PASS + 1)); echo "ok   $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL $1"; }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else fail "$d"; fi; }
+check_not() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else ok "$d"; fi; }
 section() { echo; echo "== $1"; }
 indent() { sed 's/^/    | /'; }
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
 docker info >/dev/null 2>&1 || { echo "the Docker daemon is not running" >&2; exit 2; }
+# The daemon that DOCKER=1 sessions use. With a rootless default daemon the launcher moves them to the rootful daemon
+# at the usual socket (the sidecar cannot run inside a rootless one), so every check on a sidecar, its network, its
+# volumes and its cache goes there (sd), while the pod image and the plain sessions stay on the default daemon.
+# SD_ENV is empty when both are the same daemon.
+SD_ENV=(); SD_NOTE="the default daemon"
+if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q name=rootless; then
+  _sdhost=unix:///var/run/docker.sock
+  if _sdsec="$(env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost" docker info -f '{{.SecurityOptions}}' 2>/dev/null)" && ! grep -q name=rootless <<<"$_sdsec"; then
+    SD_ENV=(env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost"); SD_NOTE="the rootful daemon at $_sdhost"
+  else
+    SD_NOTE="none: the default daemon is rootless and no rootful one answers at $_sdhost, DOCKER=1 sessions will fail"
+  fi
+fi
+sd() { ${SD_ENV[@]+"${SD_ENV[@]}"} docker "$@"; }
+# --show-daemons: print what was found and stop (the stub tests use it)
+if [ "${1:-}" = --show-daemons ]; then echo "DOCKER=1 sessions use: $SD_NOTE"; echo "sd runs: ${SD_ENV[*]:-} docker"; exit 0; fi
+
 for _a in claude copilot goose; do
   [ -n "$(docker image ls -q "agent-pod:$_a" 2>/dev/null)" ] || { echo "image 'agent-pod:$_a' not found: run ./install.sh first" >&2; exit 2; }
 done
@@ -43,13 +65,19 @@ BG_PIDS=()
 # The names of the resources a session creates, now and after the tests: whatever exists afterwards and did not
 # before is what the tests left behind. Sessions of other users of this daemon, starting or ending, do not matter.
 # Fails when any listing fails: an empty list from a broken Docker must not look like "nothing left".
-snapshot() {
+_snap() {   # _snap <docker command> <prefix>
   local a b c d
-  a="$(docker ps -a --filter label=agent-pod.run --format 'sidecar {{.Names}}' 2>/dev/null)" || return 1
-  b="$(docker ps -a --filter name=agent-pod-run- --format 'pod {{.Names}}' 2>/dev/null)" || return 1
-  c="$(docker network ls --filter name=agent-pod-net- --format 'network {{.Name}}' 2>/dev/null)" || return 1
-  d="$(docker volume ls --filter name=agent-pod-certs- --format 'volume {{.Name}}' 2>/dev/null)" || return 1
-  printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" | sed '/^$/d' | sort
+  a="$($1 ps -a --filter label=agent-pod.run --format 'sidecar {{.Names}}' 2>/dev/null)" || return 1
+  b="$($1 ps -a --filter name=agent-pod-run- --format 'pod {{.Names}}' 2>/dev/null)" || return 1
+  c="$($1 network ls --filter name=agent-pod-net- --format 'network {{.Name}}' 2>/dev/null)" || return 1
+  d="$($1 volume ls --filter name=agent-pod-certs- --format 'volume {{.Name}}' 2>/dev/null)" || return 1
+  printf '%s\n%s\n%s\n%s\n' "$a" "$b" "$c" "$d" | sed "/^\$/d;s/^/$2/"
+}
+# both daemons when there are two: a leak on the rootful one counts as much as one on the default
+snapshot() {
+  local all r; all="$(_snap docker "")" || return 1
+  if [ "${#SD_ENV[@]}" -gt 0 ]; then r="$(_snap sd "rootful ")" || return 1; all="$all"$'\n'"$r"; fi
+  printf '%s\n' "$all" | sed '/^$/d' | sort
 }
 PRE_SNAPSHOT="$(snapshot)" || { echo "cannot list the Docker resources of agent-pod" >&2; exit 2; }
 leaks_of() { comm -13 <(printf '%s\n' "$PRE_SNAPSHOT") <(printf '%s\n' "$1"); }
@@ -68,7 +96,7 @@ cleanup() {
   local p
   for p in ${BG_PIDS[@]+"${BG_PIDS[@]}"}; do kill "$p" 2>/dev/null; done
   wait 2>/dev/null
-  docker volume rm "$CACHE_VOL" "$PRUNE_VOL" >/dev/null 2>&1
+  sd volume rm "$CACHE_VOL" "$PRUNE_VOL" >/dev/null 2>&1
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] && rm -rf -- "$WORK"
   return 0
 }
@@ -91,10 +119,11 @@ start_launcher() {
 # wait_running <container name>: wait until exactly that container runs (not just any agent-pod session).
 wait_running() {
   local _; for _ in $(seq 1 240); do
-    [ -n "$(docker ps -q --filter "name=^$1\$")" ] && return 0; sleep 0.5; done; return 1
+    [ -n "$(sd ps -q --filter "name=^$1\$")" ] && return 0; sleep 0.5; done; return 1
 }
 
 echo "host uid:gid $HOST_UID:$HOST_GID, docker $(docker version -f '{{.Server.Version}}' 2>/dev/null), inner images: ${INNER_IMAGES[*]}"
+echo "DOCKER=1 sessions use: $SD_NOTE"
 
 section "pod image: the tools the pod and its Docker CLI need"
 for a in claude copilot goose; do
@@ -190,7 +219,7 @@ for ref in "${INNER_IMAGES[@]}"; do
 done
 check "first session pulled an inner image into the cache" test -n "$CACHE_IMG"
 check "first session creates the cache volume $CACHE_VOL" grep -q "created new $CACHE_VOL" "$WORK/cache1.out"
-check "cache volume exists" docker volume inspect "$CACHE_VOL"
+check "cache volume exists" sd volume inspect "$CACHE_VOL"
 run_launcher DOCKER=1 DOCKER_CACHE=1 -- docker image inspect "${CACHE_IMG:-none}" >"$WORK/cache2.out" 2>&1; rc=$?
 check "second session reuses the cache" grep -q "reusing $CACHE_VOL" "$WORK/cache2.out"
 if [ -n "$CACHE_IMG" ] && [ "$rc" = 0 ]; then ok "the pulled image is still in the cache"; else fail "the pulled image is still in the cache"; tail -n 10 "$WORK/cache2.out" | indent; fi
@@ -226,19 +255,19 @@ start_launcher DOCKER=1 DOCKER_CACHE=1 -- sleep 300 >"$WORK/long.out" 2>&1
 # This project's cache sidecar has a fixed name; its run label names the pod of the same session.
 SIDE="agent-pod-dind-cache-$CACHE_HASH"; POD=
 if wait_running "$SIDE"; then
-  POD="agent-pod-run-$(docker inspect -f '{{index .Config.Labels "agent-pod.run"}}' "$SIDE")"
+  POD="agent-pod-run-$(sd inspect -f '{{index .Config.Labels "agent-pod.run"}}' "$SIDE")"
 fi
 if [ -n "$POD" ] && wait_running "$POD"; then ok "cache session is up"; else fail "cache session is up"; tail -n 30 "$WORK/long.out" | indent; fi
 run_launcher DOCKER=1 DOCKER_CACHE=1 -- true >"$WORK/conflict.out" 2>&1; rc=$?
 if [ "$rc" != 0 ] && grep -q "docker rm -f agent-pod-dind-cache-$CACHE_HASH" "$WORK/conflict.out"; then
   ok "a second session on the same cache is rejected with the leftover hint"
 else fail "a second session on the same cache is rejected with the leftover hint (rc $rc)"; tail -n 10 "$WORK/conflict.out" | indent; fi
-check "the first session is unaffected" test -n "$(docker ps -q --filter "name=^${POD:-none}\$")"
+check "the first session is unaffected" test -n "$(sd ps -q --filter "name=^${POD:-none}\$")"
 
-if [ -n "$(docker ps -q --filter "name=^$SIDE\$")" ]; then
-  NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$SIDE")"
-  CERTS="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/certs"}}{{.Name}}{{end}}{{end}}' "$SIDE")"
-  tls() { docker run --rm --network "$NET" -v "$CERTS:/certs:ro" --entrypoint sh agent-pod:claude -c "$1"; }
+if [ -n "$(sd ps -q --filter "name=^$SIDE\$")" ]; then
+  NET="$(sd inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}' "$SIDE")"
+  CERTS="$(sd inspect -f '{{range .Mounts}}{{if eq .Destination "/certs"}}{{.Name}}{{end}}{{end}}' "$SIDE")"
+  tls() { sd run --rm --network "$NET" -v "$CERTS:/certs:ro" --entrypoint sh agent-pod:claude -c "$1"; }
   tls_out="$(tls 'curl -s -m 5 http://dind:2376/_ping' 2>&1)"
   check "plain HTTP on 2376 is refused (HTTPS server)" grep -q 'HTTP request to an HTTPS server' <<<"$tls_out"
   # Only the expected curl exit code counts as a refusal: 7 connection refused, 35/56 TLS handshake or alert. A
@@ -257,14 +286,14 @@ kill -TERM "$LP" 2>/dev/null; wait "$LP" 2>/dev/null; rc=$?
 if [ "$rc" = 143 ]; then ok "SIGTERM to the launcher -> exit 143"; else fail "SIGTERM to the launcher -> exit 143 (got $rc)"; tail -n 20 "$WORK/long.out" | indent; fi
 
 section "cache pruning (DOCKER_CACHE_MAX_AGE_DAYS)"
-check "volume for the prune test is created" docker volume create "$PRUNE_VOL"
+check "volume for the prune test is created" sd volume create "$PRUNE_VOL"
 mkdir -p "$WORK/state/agent-pod/caches"; touch -d '3 days ago' "$WORK/state/agent-pod/caches/$PRUNE_VOL" 2>/dev/null \
   || touch -t "$(date -d '3 days ago' +%Y%m%d%H%M 2>/dev/null || date -v-3d +%Y%m%d%H%M)" "$WORK/state/agent-pod/caches/$PRUNE_VOL"
 run_launcher DOCKER=1 DOCKER_CACHE=1 DOCKER_CACHE_MAX_AGE_DAYS=1 -- true >"$WORK/prune.out" 2>&1; rc=$?
 if [ "$rc" = 0 ]; then ok "the session that prunes starts and ends normally"
 else fail "the session that prunes starts and ends normally (exit $rc)"; tail -n 20 "$WORK/prune.out" | indent; fi
-check "a cache unused for longer than the limit is removed" bash -c '! docker volume inspect "$0"' "$PRUNE_VOL"
-check "the current project's cache is kept" docker volume inspect "$CACHE_VOL"
+check_not "a cache unused for longer than the limit is removed" sd volume inspect "$PRUNE_VOL"
+check "the current project's cache is kept" sd volume inspect "$CACHE_VOL"
 
 section "nothing left behind"
 LEAKS=; SNAP_OK=
