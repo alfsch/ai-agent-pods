@@ -49,8 +49,15 @@ AGENT="${AGENT-claude}"
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
+echo "$1 ${DOCKER_HOST:-}" >> "$STUB_DIR/hosts"
 case "$1" in
-  info) exit 0 ;;
+  info)
+    # STUB_ROOTLESS=1: the default daemon is rootless; STUB_ROOTFUL_SOCK=1: there is a rootful one at /var/run/docker.sock
+    if [ "${DOCKER_HOST:-}" = unix:///var/run/docker.sock ]; then
+      [ -n "${STUB_ROOTFUL_SOCK:-}" ] || exit 1
+      [[ "$*" != *SecurityOptions* ]] || echo "[name=seccomp,profile=builtin name=cgroupns]"; exit 0
+    fi
+    [[ "$*" != *SecurityOptions* ]] || echo "[name=seccomp,profile=builtin${STUB_ROOTLESS:+ name=rootless} name=cgroupns]"; exit 0 ;;
   image)
     # image labels, for the update check
     if [ "$2" = inspect ]; then
@@ -277,6 +284,28 @@ test_plain_exec() {   # without DOCKER=1 the launcher only execs docker run (inv
   [ "$(grep -c . "$STUB_LOG")" = 3 ] || fail "expected info, image ls and one run"
   not_logged 'network|volume|--init|--privileged'
   logged "^run --rm .*agent-pod:$AGENT true\$"
+}
+test_rootless_user() {   # rootless Docker maps the host user to container root: the pod must run as 0:0 to read its state dir
+  setup_case; launch STUB_UID=1001 STUB_GID=1001 --
+  rc_is 0; logged '^run --rm .*--user 1001:1001 '; not_logged 'IS_SANDBOX'
+  setup_case; launch STUB_ROOTLESS=1 STUB_UID=1001 STUB_GID=1001 --
+  rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'user 1001'
+  logged '^run --rm .* -e IS_SANDBOX=1 '   # Claude Code refuses --dangerously-skip-permissions as root, the pod is the sandbox
+  setup_case; AGENT=copilot launch STUB_ROOTLESS=1 --; rc_is 0; logged '^run --rm .*--user 0:0 '; not_logged 'IS_SANDBOX'
+}
+test_rootless_default_daemon() {   # DOCKER=1 on a rootless default daemon: everything goes to the rootful one, or it stops
+  local ok=unix:///var/run/docker.sock
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_UID=1001 STUB_GID=1001 -- true
+  rc_is 0; in_out 'rootful daemon at unix:///var/run/docker.sock'
+  logged '^run -d --privileged '; logged '^run --rm .*--user 1001:1001 '; not_logged 'user 0:0'
+  ! tail -n +2 "$STUB_DIR/hosts" | grep -qvE " $ok\$" || fail "a docker call did not go to the rootful daemon"
+  setup_case; launch DOCKER=1 STUB_ROOTLESS=1 -- true
+  [ "$RC" != 0 ] || fail "started on a rootless daemon without a rootful one"
+  in_out 'does not work on a rootless Docker daemon'; not_logged '^run '
+  setup_case; launch STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 -- true     # without DOCKER=1 the default daemon stays
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon without DOCKER=1"
+  setup_case; launch DOCKER=1 STUB_ROOTFUL_SOCK=1 -- true            # rootful default daemon: nothing changes
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon although the default is rootful"
 }
 test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cleanup
   setup_case; launch DOCKER=1 STUB_POD_EXIT=7 -- true
@@ -867,6 +896,14 @@ mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in 
 run_mutants() {
   local rc=0
   mutate test_sequence      $'  ${DOCKER:+--init} \\\n' '' || rc=1
+  mutate test_rootless_user 'POD_USER=0:0' 'POD_USER="$(id -u):$(id -g)"' || rc=1
+  mutate test_rootless_user '[ "${POD_USER%%:*}" != 0 ] || [ -z "$A_ROOT_ENV" ]' 'true' || rc=1
+  mutate test_rootless_user 'A_FORWARD=; A_ROOT_ENV=IS_SANDBOX=1' 'A_FORWARD=; A_ROOT_ENV=' || rc=1
+  mutate test_rootless_user 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=' 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=IS_SANDBOX=1' || rc=1
+  mutate test_rootless_default_daemon 'export DOCKER_HOST="$ROOTFUL_HOST"; ' '' || rc=1
+  mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
+  mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
+  mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1
   mutate test_sequence      'docker run -d --privileged --init \' 'docker run -d --privileged \' || rc=1
   mutate test_sequence      $'  docker network rm "$DIND_NET" >/dev/null 2>&1 || true\n' '' || rc=1
   mutate test_option_validation 'die "$_v must be 1 (or unset), not '"'"'${!_v}'"'"'."' 'true' || rc=1
