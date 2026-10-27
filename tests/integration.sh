@@ -49,7 +49,7 @@ if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q name=rootless; th
 fi
 sd() { ${SD_ENV[@]+"${SD_ENV[@]}"} docker "$@"; }
 # --show-daemons: print what was found and stop (the stub tests use it)
-if [ "${1:-}" = --show-daemons ]; then echo "DOCKER=1 sessions use: $SD_NOTE"; echo "sd runs: ${SD_ENV[*]:-} docker"; exit 0; fi
+if [ "${1:-}" = --show-daemons ]; then echo "DOCKER=1 sessions use: $SD_NOTE"; echo "sd runs: ${SD_ENV[*]:-} docker"; sd version -f '{{.Server.Version}}' >/dev/null 2>&1; exit 0; fi
 
 for _a in claude copilot goose; do
   [ -n "$(docker image ls -q "agent-pod:$_a" 2>/dev/null)" ] || { echo "image 'agent-pod:$_a' not found: run ./install.sh first" >&2; exit 2; }

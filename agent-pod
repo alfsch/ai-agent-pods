@@ -124,12 +124,14 @@ _sec="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || die "Docker
 # only 65537 ids, the sidecar asks for 100000 and up) and could not write the project folder anyway (it belongs to
 # the host daemon's root, the sidecar's dockerd must not be root). So with DOCKER=1 and a rootless default daemon
 # the whole launch uses the rootful daemon at the usual socket, if there is one that answers.
+DOCKER_HINT=docker
 if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)
   ROOTFUL_HOST=unix:///var/run/docker.sock
   unset DOCKER_CONTEXT   # it wins over DOCKER_HOST: a set context would send the probe and the launch back to the rootless daemon
   _sec2="$(DOCKER_HOST="$ROOTFUL_HOST" docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || _sec2=name=rootless   # no answer counts like a rootless one
   case "$_sec2" in *name=rootless*) die "DOCKER=1 does not work on a rootless Docker daemon, and no rootful daemon answers at $ROOTFUL_HOST. Start without DOCKER=1, or see 'Using Docker inside the pod' in the README." ;; esac
   export DOCKER_HOST="$ROOTFUL_HOST"; _sec="$_sec2"
+  DOCKER_HINT="env -u DOCKER_CONTEXT DOCKER_HOST=$ROOTFUL_HOST docker"   # a command printed for the user's own shell must name the daemon
   printf '%s●%s The default Docker daemon is rootless: using the rootful daemon at %s for DOCKER=1.\n' "$BOLD" "$RESET" "$ROOTFUL_HOST" >&2
 ;; esac; fi
 if [ -z "$(docker image ls -q "$IMAGE" 2>/dev/null)" ]; then
@@ -483,7 +485,7 @@ EOF
     ${DIND_DATA_FLAGS[@]+"${DIND_DATA_FLAGS[@]}"} \
     -v "$PWD:$PWD" \
     "$DIND_IMAGE" >/dev/null \
-    || die "Could not start the Docker sidecar ($DIND_IMAGE).${DOCKER_CACHE:+ If the cache is in use by another session, close that one; a leftover from a killed session: docker rm -f $DIND_NAME}"
+    || die "Could not start the Docker sidecar ($DIND_IMAGE).${DOCKER_CACHE:+ If the cache is in use by another session, close that one; a leftover from a killed session: $DOCKER_HINT rm -f $DIND_NAME}"
   printf '%s●%s Starting Docker sidecar...\n' "$BOLD" "$RESET" >&2
   for _i in $(seq 1 60); do
     docker exec -e DOCKER_HOST=tcp://localhost:2376 -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client \

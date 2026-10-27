@@ -341,13 +341,14 @@ test_integration_daemons() {   # tests/integration.sh sends its DOCKER=1 checks 
   local show=(--show-daemons)
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
   rc_is 0; in_out 'use: the rootful daemon at unix:///var/run/docker.sock'
-  in_out 'sd runs: env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker$'   # the calls really go there
+  in_out 'sd runs: env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker$'
+  grep -qxF 'version unix:///var/run/docker.sock' "$STUB_DIR/hosts" || fail "an sd call did not reach the rootful daemon"
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_ROOTFUL_ROOTLESS=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
   rc_is 0; in_out 'no rootful one answers'; in_out 'sd runs:  docker$'   # an answering socket that is rootless is no fallback
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
   rc_is 0; in_out 'no rootful one answers'
   setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
-  rc_is 0; in_out 'use: the default daemon'; in_out 'sd runs:  docker$'; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "probed a second daemon although the default is rootful"
+  rc_is 0; in_out 'use: the default daemon'; in_out 'sd runs:  docker$'; grep -qxF 'version ' "$STUB_DIR/hosts" || fail "an sd call did not reach the default daemon"; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "probed a second daemon although the default is rootful"
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 DOCKER_CONTEXT=rootless "$ITEST" "${show[@]}" >"$CASE/out" 2>"$CASE/err" || RC=$?
   rc_is 0; in_out 'use: the rootful daemon'   # a context of the caller must not hide the rootful daemon
 }
@@ -387,9 +388,12 @@ test_cache_reuse() {
 }
 test_cache_conflict() {   # name already taken: refuse, point at the leftover, touch nothing of the other session
   setup_case; launch DOCKER=1 DOCKER_CACHE=1 STUB_NAME_CONFLICT=1 -- true
-  rc_is 1; in_out "docker rm -f agent-pod-dind-cache-$HASH"
+  rc_is 1; in_out "docker rm -f agent-pod-dind-cache-$HASH"; ! grep -q 'DOCKER_HOST=' "$CASE/err" "$CASE/out" || fail "the hint names a daemon without a fallback"
   not_logged '^run --rm'; not_logged '^(stop|rm -f -v)'
   logged '^network rm '
+  # after the fallback the command typed in the user's shell must reach the rootful daemon, not the rootless default
+  setup_case; launch DOCKER=1 DOCKER_CACHE=1 STUB_NAME_CONFLICT=1 STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 -- true
+  rc_is 1; in_out "env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker rm -f agent-pod-dind-cache-$HASH"
 }
 test_host_uid() {   # Linux, uid other than 1000: derived sidecar image for that uid, built once, before the sidecar
   setup_case; launch DOCKER=1 STUB_UID=1001 STUB_GID=1002 -- true
@@ -952,6 +956,9 @@ run_mutants() {
   mutate test_uninstall_two_daemons 'docker volume rm $_vols >/dev/null 2>&1 ||' 'true ||' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'No rootful Docker daemon answers at' 'Rootful daemon missing at' uninstall.sh || rc=1
   mutate test_integration_daemons 'SD_ENV=(env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost"); ' 'true; ' tests/integration.sh || rc=1
+  mutate test_integration_daemons 'sd() { ${SD_ENV[@]+"${SD_ENV[@]}"} docker "$@"; }' 'sd() { docker "$@"; }' tests/integration.sh || rc=1
+  mutate test_cache_conflict 'a leftover from a killed session: $DOCKER_HINT rm -f $DIND_NAME}"' 'a leftover from a killed session: docker rm -f $DIND_NAME}"' || rc=1
+  mutate test_cache_conflict '  DOCKER_HINT="env -u DOCKER_CONTEXT DOCKER_HOST=$ROOTFUL_HOST docker"' '  DOCKER_HINT=docker' || rc=1
   mutate test_integration_daemons 'env -u DOCKER_CONTEXT DOCKER_HOST="$_sdhost" docker info' 'DOCKER_HOST="$_sdhost" docker info' tests/integration.sh || rc=1
   mutate test_integration_daemons '&& ! grep -q name=rootless <<<"$_sdsec"' '&& true' tests/integration.sh || rc=1
   mutate test_integration_daemons "if docker info -f '{{.SecurityOptions}}' 2>/dev/null | grep -q name=rootless; then" 'if true; then' tests/integration.sh || rc=1
