@@ -10,6 +10,7 @@ T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
+UNINSTALLER="${UNINSTALLER:-$ROOT/uninstall.sh}"
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
@@ -216,7 +217,7 @@ setup_case() {
   export STUB_LOG="$CASE/docker.log" STUB_DIR="$CASE/stub"; mkdir -p "$STUB_DIR"; : > "$STUB_LOG"
   HASH="$(cd "$PROJ" && { pwd -P; echo 1000:1000; } | sha16)"   # the stub reports uid and gid 1000
 }
-launch_env() { cd "$PROJ" && HOME="$H" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
+launch_env() { cd "$PROJ" && unset DOCKER_HOST DOCKER_CONTEXT && HOME="$H" XDG_STATE_HOME="$H/state" XDG_CONFIG_HOME="$H/config" AGENT_POD_NO_UPDATE=1 PATH="$BIN:$PATH" "$@"; }
 launch() {   # launch <env VAR=...>... -- args   (foreground; sets RC)
   local envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
   RC=0; (launch_env env ${envs[@]+"${envs[@]}"} timeout 60 "$LAUNCHER" ${AGENT:+"$AGENT"} "$@" </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
@@ -309,6 +310,23 @@ test_rootless_default_daemon() {   # DOCKER=1 on a rootless default daemon: ever
   rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon without DOCKER=1"
   setup_case; launch DOCKER=1 STUB_ROOTFUL_SOCK=1 -- true            # rootful default daemon: nothing changes
   rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "switched daemon although the default is rootful"
+}
+test_harness_ignores_inherited_daemon() {   # the caller's DOCKER_HOST/DOCKER_CONTEXT must not steer the stub cases
+  setup_case; DOCKER_HOST=unix:///var/run/docker.sock DOCKER_CONTEXT=rootless launch --
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "the launcher saw the caller's DOCKER_HOST"
+}
+test_uninstall_two_daemons() {   # a rootless default daemon with a rootful fallback: both lose their images and volumes
+  setup_case; mkdir -p "$H/.claude-pod" "$H/state/agent-pod/caches"
+  RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?
+  rc_is 0; in_out 'rootful fallback'
+  grep -qxF 'volume ' "$STUB_DIR/hosts" && grep -qxF 'volume unix:///var/run/docker.sock' "$STUB_DIR/hosts" \
+    || fail "volumes were not listed on both daemons"
+  grep -qxF 'rmi unix:///var/run/docker.sock' "$STUB_DIR/hosts" || fail "no image removed on the rootful daemon"
+  [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/state/agent-pod" ] || fail "host state was not removed"
+  setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
+  rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "touched a second daemon although the default is rootful"
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
+  rc_is 0; ! grep -q 'rmi unix:///var/run' "$STUB_DIR/hosts" || fail "removed images on a daemon that does not answer"
 }
 test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cleanup
   setup_case; launch DOCKER=1 STUB_POD_EXIT=7 -- true
@@ -886,7 +904,7 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -905,6 +923,9 @@ run_mutants() {
   mutate test_rootless_user 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=' 'A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=IS_SANDBOX=1' || rc=1
   mutate test_rootless_default_daemon 'export DOCKER_HOST="$ROOTFUL_HOST"; ' '' || rc=1
   mutate test_rootless_default_daemon $'  unset DOCKER_CONTEXT ' ' #' || rc=1
+  mutate test_uninstall_two_daemons 'DAEMONS+=(unix:///var/run/docker.sock)' 'true' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons '[[ "$_sec2" == *name=rootless* ]] || DAEMONS' 'DAEMONS' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'if [[ "$_sec" == *name=rootless* ]]; then' 'if true; then' uninstall.sh || rc=1
   mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
   mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
   mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1

@@ -159,7 +159,7 @@ Intentionally minimal: `node:24-slim` + `git` + `curl` + `less` + `jq` + `gh` + 
 - **`agent-pod`**: one `docker run` that mounts your current directory and the agent's state dir, and nothing else of your machine. Run as `claude-pod` / `copilot-pod` / `goose-pod` it is the same script.
 - **`Dockerfile.base`**: the tools above, published as the base image by `.github/workflows/publish-base.yaml`. **`Dockerfile`**: the agent on top of it; `AGENT_PKG`/`AGENT_VERSION` build args select the agent.
 - **`install.sh`**: checks Docker and builds the images; it does not touch any system path.
-- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation.
+- **`uninstall.sh`**: removes the images, the cache volumes, the sidecar images, both state dirs and the config dir after confirmation. With a rootless default daemon it also cleans the rootful daemon at `/var/run/docker.sock`, where `DOCKER=1` sessions run (see "Using Docker inside the pod").
 
 The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` and `--rm`, and a process cap.
 
