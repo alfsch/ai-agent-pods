@@ -328,9 +328,11 @@ test_uninstall_two_daemons() {   # a rootless default daemon with a rootful fall
   [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/state/agent-pod" ] || fail "host state was not removed"
   setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
   rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "touched a second daemon although the default is rootful"
+  ! grep -q 'No rootful Docker daemon answers' "$CASE/out" "$CASE/err" || fail "warned about a missing rootful daemon on a rootful default"
   n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "rootful default: the cache volume was removed $n times, expected once"
   setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
   rc_is 0; ! grep -q 'rmi unix:///var/run' "$STUB_DIR/hosts" || fail "removed images on a daemon that does not answer"
+  in_out 'No rootful Docker daemon answers'   # the leftovers are reported, not silently skipped
   n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "no rootful daemon: the cache volume was removed $n times, expected once"
 }
 test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cleanup
@@ -929,9 +931,10 @@ run_mutants() {
   mutate test_rootless_default_daemon 'export DOCKER_HOST="$ROOTFUL_HOST"; ' '' || rc=1
   mutate test_rootless_default_daemon $'  unset DOCKER_CONTEXT ' ' #' || rc=1
   mutate test_uninstall_two_daemons 'DAEMONS+=(unix:///var/run/docker.sock)' 'true' uninstall.sh || rc=1
-  mutate test_uninstall_two_daemons '[[ "$_sec2" == *name=rootless* ]] || DAEMONS' 'DAEMONS' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons '  if [[ "$_sec2" == *name=rootless* ]]; then' '  if false; then' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'if [[ "$_sec" == *name=rootless* ]]; then' 'if true; then' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'docker volume rm $_vols >/dev/null 2>&1 ||' 'true ||' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'No rootful Docker daemon answers at' 'Rootful daemon missing at' uninstall.sh || rc=1
   mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
   mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
   mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1

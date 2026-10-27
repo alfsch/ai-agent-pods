@@ -106,7 +106,11 @@ DAEMONS=("")   # "" is the default daemon
 _sec="$(docker info --format '{{.SecurityOptions}}' 2>/dev/null || true)"
 if [[ "$_sec" == *name=rootless* ]]; then
   _sec2="$(env -u DOCKER_CONTEXT DOCKER_HOST=unix:///var/run/docker.sock docker info --format '{{.SecurityOptions}}' 2>/dev/null)" || _sec2=name=rootless
-  [[ "$_sec2" == *name=rootless* ]] || DAEMONS+=(unix:///var/run/docker.sock)
+  if [[ "$_sec2" == *name=rootless* ]]; then
+    printf '%s  No rootful Docker daemon answers at /var/run/docker.sock. If DOCKER=1 sessions ran on one, its images and cache volumes (agent-pod:*, agent-pod-docker-*) are still there: remove them with DOCKER_HOST=unix:///var/run/docker.sock once it is reachable.%s\n\n' "$DIM" "$RESET"
+  else
+    DAEMONS+=(unix:///var/run/docker.sock)
+  fi
 fi
 for _d in "${DAEMONS[@]}"; do
   if [ -n "$_d" ]; then
