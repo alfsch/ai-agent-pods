@@ -84,6 +84,7 @@ case "$1" in
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
   volume)
     case "$2" in
+      ls) [ -z "${STUB_VOLUMES:-}" ] || echo "$STUB_VOLUMES"; exit 0 ;;   # the volumes the daemon lists (one name)
       inspect) [ -n "${STUB_VOLUME_EXISTS:-}" ]; exit ;;
       rm)
         if [[ " ${STUB_RM_INUSE:-} " == *" $3 "* ]]; then
@@ -316,17 +317,21 @@ test_harness_ignores_inherited_daemon() {   # the caller's DOCKER_HOST/DOCKER_CO
   rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "the launcher saw the caller's DOCKER_HOST"
 }
 test_uninstall_two_daemons() {   # a rootless default daemon with a rootful fallback: both lose their images and volumes
+  local vol=agent-pod-docker-0123456789abcdef n
   setup_case; mkdir -p "$H/.claude-pod" "$H/state/agent-pod/caches"
-  RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?
+  RC=0; launch_env env STUB_ROOTLESS=1 STUB_ROOTFUL_SOCK=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?
   rc_is 0; in_out 'rootful fallback'
   grep -qxF 'volume ' "$STUB_DIR/hosts" && grep -qxF 'volume unix:///var/run/docker.sock' "$STUB_DIR/hosts" \
     || fail "volumes were not listed on both daemons"
   grep -qxF 'rmi unix:///var/run/docker.sock' "$STUB_DIR/hosts" || fail "no image removed on the rootful daemon"
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 2 ] || fail "the cache volume was removed $n times, expected once per daemon"
   [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/state/agent-pod" ] || fail "host state was not removed"
-  setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
+  setup_case; RC=0; launch_env env STUB_ROOTFUL_SOCK=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # rootful default: one daemon
   rc_is 0; ! grep -q 'unix:///var/run' "$STUB_DIR/hosts" || fail "touched a second daemon although the default is rootful"
-  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "rootful default: the cache volume was removed $n times, expected once"
+  setup_case; RC=0; launch_env env STUB_ROOTLESS=1 STUB_VOLUMES=$vol "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?   # no rootful daemon
   rc_is 0; ! grep -q 'rmi unix:///var/run' "$STUB_DIR/hosts" || fail "removed images on a daemon that does not answer"
+  n="$(grep -cxF "volume rm $vol" "$STUB_LOG")"; [ "$n" = 1 ] || fail "no rootful daemon: the cache volume was removed $n times, expected once"
 }
 test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cleanup
   setup_case; launch DOCKER=1 STUB_POD_EXIT=7 -- true
@@ -926,6 +931,7 @@ run_mutants() {
   mutate test_uninstall_two_daemons 'DAEMONS+=(unix:///var/run/docker.sock)' 'true' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons '[[ "$_sec2" == *name=rootless* ]] || DAEMONS' 'DAEMONS' uninstall.sh || rc=1
   mutate test_uninstall_two_daemons 'if [[ "$_sec" == *name=rootless* ]]; then' 'if true; then' uninstall.sh || rc=1
+  mutate test_uninstall_two_daemons 'docker volume rm $_vols >/dev/null 2>&1 ||' 'true ||' uninstall.sh || rc=1
   mutate test_rootless_default_daemon 'if [ -n "${DOCKER:-}" ]; then case "$_sec" in *name=rootless*)' 'if true; then case "$_sec" in *name=rootless*)' || rc=1
   mutate test_rootless_default_daemon '*name=rootless*) die "DOCKER=1 does not work' '*name=nothing*) die "DOCKER=1 does not work' || rc=1
   mutate test_rootless_user '*name=rootless*) POD_USER=0:0' '*name=nothing*) POD_USER=0:0' || rc=1
