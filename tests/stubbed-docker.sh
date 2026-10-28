@@ -696,6 +696,14 @@ test_skills_dir() {   # AGENT_POD_SKILLS_DIR: one read-only mount per skill of a
   sk; echo '{}' > "$S/audit/cfg.json"; mkdir -p "$H/config/agent-pod"; ln -s "$S/audit/cfg.json" "$H/config/agent-pod/claude.json"
   AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a skill containing the symlinked config file was accepted"
   in_out 'AGENT_POD_SKILLS_DIR .* contains'; not_logged '^run '
+  # a chain of config file links is followed up to 10 hops; a longer one cannot be checked and is refused, not half-checked
+  sk; echo '{}' > "$CASE/cfg.json"; mkdir -p "$H/config/agent-pod"; ln -s "$CASE/cfg.json" "$H/config/agent-pod/l11"
+  for i in 10 9 8 7 6 5 4 3 2; do ln -s "$H/config/agent-pod/l$((i + 1))" "$H/config/agent-pod/l$i"; done
+  ln -s "$H/config/agent-pod/l2" "$H/config/agent-pod/claude.json"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a config file behind 11 symlinks was accepted"
+  in_out 'more than 10 symlinks'; not_logged '^run '
+  rm "$H/config/agent-pod/claude.json"; ln -s "$H/config/agent-pod/l3" "$H/config/agent-pod/claude.json"   # 10 links: followed to the end
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
   # each agent gets them where it reads its personal skills; goose's dir is one the launcher already mounts from the host
   sk; AGENT=copilot launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
   logged " -v $S/audit:/home/agent-pod/.copilot/skills/audit:ro "; not_logged '\.claude/skills/'
@@ -1099,6 +1107,7 @@ run_mutants() {
   mutate test_skills_dir    '_wr=(); for _w in "$PWD" "$A_STATE_DIR"; do' '_wr=(); for _w in "$PWD"; do' || rc=1
   mutate test_skills_dir    '  for _d in $A_EXTRA_DIRS; do _wr+=(' '  for _d in; do _wr+=(' || rc=1
   mutate test_skills_dir    '    while [ -L "$_f" ] && [ "$_n" -lt 10 ]; do' '    while false; do' || rc=1
+  mutate test_skills_dir    '    [ ! -L "$_f" ] || die "The config file' '    : || die "The config file' || rc=1
   mutate test_skills_dir    '    _p="$(cd "$(dirname "$_f")" && pwd -P)" && _wr+=(' '    false && _wr+=(' || rc=1
   mutate test_skills_dir    '  skills_overlap "$_s" "AGENT_POD_SKILLS_DIR"' '  :' || rc=1
   mutate test_skills_dir    '  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" ||' '  _s="$AGENT_POD_SKILLS_DIR"; true ||' || rc=1

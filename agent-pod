@@ -267,6 +267,7 @@ if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then
     while [ -L "$_f" ] && [ "$_n" -lt 10 ]; do
       _t="$(readlink "$_f")"; case "$_t" in /*) _f="$_t" ;; *) _f="$(dirname "$_f")/$_t" ;; esac; _n=$((_n + 1))
     done
+    [ ! -L "$_f" ] || die "The config file $A_CFG_PATH is a chain of more than 10 symlinks, so where it ends cannot be checked."
     _p="$(cd "$(dirname "$_f")" && pwd -P)" && _wr+=("$_p/$(basename "$_f")")
   fi
   skills_overlap() {   # skills_overlap <path> <what>: refuse a path that is in, or contains, a dir the pod can write
