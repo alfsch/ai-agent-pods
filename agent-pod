@@ -248,16 +248,25 @@ fi
 # AGENT_POD_SKILLS_DIR: a host folder of skills (<name>/SKILL.md), mounted read-only, one mount per skill so that the
 # agent's own skills in the same dir (Claude Code's synced/ among them) stay visible and the pod cannot change the host
 # copy. Docker leaves an empty <name> dir in the state dir as the mount point. A skill of the same name there is shadowed.
+# The :ro covers only that path: a skill that is in (or contains) a dir the pod can write, such as the project folder or the
+# state dir, could be changed through that other path and would load in the next session, so it is refused, as the git config
+# is. The skill is resolved first (a symlinked skill dir counts by where it really is) and mounted from its real path.
 SKILLS_MOUNT=()
 if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then
   [ -d "$AGENT_POD_SKILLS_DIR" ] || die "AGENT_POD_SKILLS_DIR=$AGENT_POD_SKILLS_DIR is not a directory."
-  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" || die "Cannot use $AGENT_POD_SKILLS_DIR."
   # Docker creates a missing mount-point dir as root: a state dir subfolder is made here, owned by the host user, so that
   # the empty <name> dirs in it can be removed without sudo (the dir of goose is already made above).
   case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac
-  for _k in "$_s"/*/; do
+  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k in "$AGENT_POD_SKILLS_DIR"/*/; do
     [ -f "${_k}SKILL.md" ] || continue
-    SKILLS_MOUNT+=(-v "${_k%/}:/home/agent-pod/$A_SKILLS_TARGET/$(basename "$_k"):ro")
+    _r="$(cd "$_k" && pwd -P)" || continue
+    for _w in "${_writable[@]}"; do
+      _w="$(cd "$_w" && pwd -P)" || continue
+      case "$_r/" in "$_w"/*) die "The skill $_r is in $_w, which the pod can write: it could change the skill through that path. Keep the skills elsewhere." ;; esac
+      case "$_w/" in "$_r"/*) die "The skill $_r contains $_w, which the pod can write: it could change the skill through that path. Keep the skills elsewhere." ;; esac
+    done
+    SKILLS_MOUNT+=(-v "$_r:/home/agent-pod/$A_SKILLS_TARGET/$(basename "$_k"):ro")
   done
   [ "${#SKILLS_MOUNT[@]}" -gt 0 ] || die "AGENT_POD_SKILLS_DIR=$AGENT_POD_SKILLS_DIR holds no skill (a folder with a SKILL.md)."
 fi

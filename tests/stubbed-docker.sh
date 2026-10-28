@@ -649,11 +649,36 @@ test_skills_dir() {   # AGENT_POD_SKILLS_DIR: one read-only mount per skill of a
   logged " -v $S/audit:/home/agent-pod/.claude/skills/audit:ro "; not_logged ' -v \.\./'
   # a path that is not a directory, or a folder without any skill, stops the launcher before anything is started
   sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_SKILLS_DIR was accepted"
-  in_out 'AGENT_POD_SKILLS_DIR='; not_logged '^run '
+  in_out 'is not a directory'; not_logged '^run '
   sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/file.md" -- true; [ "$RC" != 0 ] || fail "a file as AGENT_POD_SKILLS_DIR was accepted"
-  not_logged '^run '
+  in_out 'is not a directory'; not_logged '^run '
   sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/not-a-skill" -- true; [ "$RC" != 0 ] || fail "a folder without skills was accepted"
   in_out 'no skill'; not_logged '^run '
+  # a skill the pod can write through another mount is refused, as is one that contains such a dir: :ro covers one path only
+  sk; mkdir -p "$PROJ/skills/audit"; echo a > "$PROJ/skills/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$PROJ/skills" -- true; [ "$RC" != 0 ] || fail "skills inside the project folder were accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; mkdir -p "$H/.claude-pod/mine/audit"; echo a > "$H/.claude-pod/mine/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$H/.claude-pod/mine" -- true; [ "$RC" != 0 ] || fail "skills inside the state dir were accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; mkdir -p "$H/config/agent-pod/claude-skills/mine/audit"; echo a > "$H/config/agent-pod/claude-skills/mine/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$H/config/agent-pod/claude-skills/mine" -- true; [ "$RC" != 0 ] || fail "skills inside a mounted skills dir were accepted"
+  in_out 'can write'; not_logged '^run '
+  # the project folder itself is a skill, or inside one
+  sk; echo a > "$PROJ/SKILL.md"; AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE" -- true; [ "$RC" != 0 ] || fail "the project folder as a skill was accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; PROJ="$CASE/outer/proj"; mkdir -p "$PROJ"; echo a > "$CASE/outer/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE" -- true; [ "$RC" != 0 ] || fail "a project folder inside a skill was accepted"
+  in_out 'contains'; not_logged '^run '
+  # a skill dir that is a symlink counts by where it really is
+  sk; mkdir -p "$PROJ/real"; echo a > "$PROJ/real/SKILL.md"; ln -s "$PROJ/real" "$S/linked"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a skill symlinked into the project folder was accepted"
+  in_out 'can write'; not_logged '^run '
+  # but a symlink to a folder elsewhere is mounted from its real path, and a neighbouring dir with a similar name is fine
+  sk; mkdir -p "$CASE/elsewhere/linked" "$PROJ-other/skills/near"; echo a > "$CASE/elsewhere/linked/SKILL.md"; echo a > "$PROJ-other/skills/near/SKILL.md"
+  ln -s "$CASE/elsewhere/linked" "$S/linked"; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $(cd "$CASE/elsewhere/linked" && pwd -P):/home/agent-pod/.claude/skills/linked:ro "
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$PROJ-other/skills" -- true; rc_is 0; logged "skills/near:/home/agent-pod/.claude/skills/near:ro "
   # each agent gets them where it reads its personal skills; goose's dir is one the launcher already mounts from the host
   sk; AGENT=copilot launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
   logged " -v $S/audit:/home/agent-pod/.copilot/skills/audit:ro "; not_logged '\.claude/skills/'
@@ -1045,9 +1070,20 @@ run_mutants() {
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
   mutate test_skills_dir    '${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"}' '' || rc=1
-  mutate test_skills_dir    '/$(basename "$_k"):ro")' '/$(basename "$_k"))' || rc=1
+  mutate test_skills_dir    '$(basename "$_k"):ro")' '$(basename "$_k")")' || rc=1
+  mutate test_skills_dir    '      case "$_r/" in "$_w"/*) die' '      case "$_r/" in "$_w"/_never_) die' || rc=1
+  mutate test_skills_dir    '      case "$_w/" in "$_r"/*) die' '      case "$_w/" in "$_r"/_never_) die' || rc=1
+  mutate test_skills_dir    '  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' '  _writable=("$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' || rc=1
+  mutate test_skills_dir    '  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' '  _writable=("$PWD"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' || rc=1
+  mutate test_skills_dir    '  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' '  _writable=("$PWD" "$A_STATE_DIR"); for _d in; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  for _k' || rc=1
+  mutate test_skills_dir    '    _r="$(cd "$_k" && pwd -P)" || continue' '    _r="${_k%/}"' || rc=1
   mutate test_skills_dir    '    [ -f "${_k}SKILL.md" ] || continue' '    :' || rc=1
-  mutate test_skills_dir    '  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" ||' '  _s="$AGENT_POD_SKILLS_DIR"; true ||' || rc=1
   mutate test_skills_dir    '  [ -d "$AGENT_POD_SKILLS_DIR" ] || die' '  : || die' || rc=1
   mutate test_skills_dir    '  [ "${#SKILLS_MOUNT[@]}" -gt 0 ] || die' '  : || die' || rc=1
   mutate test_skills_dir    '  case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac' '  :' || rc=1
