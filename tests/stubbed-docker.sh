@@ -632,6 +632,87 @@ test_git_identity() {   # a git config of the user is the pod's global one: read
   # but a neighbouring directory with a similar name is fine
   gi; mkdir -p "$PROJ-other"; echo w > "$PROJ-other/gc"; launch AGENT_POD_GITCONFIG="$PROJ-other/gc" -- true; rc_is 0
 }
+test_skills_dir() {   # AGENT_POD_SKILLS_DIR: one read-only mount per skill of a host folder, at the skills dir of each agent
+  local S
+  sk() { setup_case; S="$(cd "$CASE" && pwd -P)/skills"; mkdir -p "$S/audit" "$S/review" "$S/not-a-skill"; echo a > "$S/audit/SKILL.md"; echo r > "$S/review/SKILL.md"; echo x > "$S/not-a-skill/notes.md"; echo f > "$S/file.md"; }
+  # unset: nothing is mounted there
+  sk; AGENT=claude launch -- true; rc_is 0; not_logged ':ro'; not_logged '\.claude/skills/'
+  # every folder with a SKILL.md, read-only, at the agent's skills dir; folders without one and plain files are left out
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.claude/skills/audit:ro "; logged " -v $S/review:/home/agent-pod/.claude/skills/review:ro "
+  [ -d "$H/.claude-pod/skills" ] || fail "the skills dir in the state dir was not created by the launcher"
+  not_logged 'not-a-skill'; not_logged 'file\.md'
+  # the state dir stays mounted as a whole, so the synced skills of the account are still there
+  logged " -v $H/.claude-pod:/home/agent-pod/.claude "
+  # a relative path (the launcher runs in the project folder) reaches Docker as an absolute one: a relative source is a volume name
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR=../skills -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.claude/skills/audit:ro "; not_logged ' -v \.\./'
+  # a path that is not a directory, or a folder without any skill, stops the launcher before anything is started
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_SKILLS_DIR was accepted"
+  in_out 'is not a directory'; not_logged '^run '
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/file.md" -- true; [ "$RC" != 0 ] || fail "a file as AGENT_POD_SKILLS_DIR was accepted"
+  in_out 'is not a directory'; not_logged '^run '
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/not-a-skill" -- true; [ "$RC" != 0 ] || fail "a folder without skills was accepted"
+  in_out 'no skill'; not_logged '^run '
+  # a skill the pod can write through another mount is refused, as is one that contains such a dir: :ro covers one path only
+  sk; mkdir -p "$PROJ/skills/audit"; echo a > "$PROJ/skills/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$PROJ/skills" -- true; [ "$RC" != 0 ] || fail "skills inside the project folder were accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; mkdir -p "$H/.claude-pod/mine/audit"; echo a > "$H/.claude-pod/mine/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$H/.claude-pod/mine" -- true; [ "$RC" != 0 ] || fail "skills inside the state dir were accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; mkdir -p "$H/config/agent-pod/claude-skills/mine/audit"; echo a > "$H/config/agent-pod/claude-skills/mine/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$H/config/agent-pod/claude-skills/mine" -- true; [ "$RC" != 0 ] || fail "skills inside a mounted skills dir were accepted"
+  in_out 'can write'; not_logged '^run '
+  # the project folder itself is a skill, or inside one
+  sk; echo a > "$PROJ/SKILL.md"; AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE" -- true; [ "$RC" != 0 ] || fail "the project folder as a skill was accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; PROJ="$CASE/outer/proj"; mkdir -p "$PROJ"; echo a > "$CASE/outer/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE" -- true; [ "$RC" != 0 ] || fail "a project folder inside a skill was accepted"
+  in_out 'contains'; not_logged '^run '
+  # a skill dir that is a symlink counts by where it really is
+  sk; mkdir -p "$PROJ/real"; echo a > "$PROJ/real/SKILL.md"; ln -s "$PROJ/real" "$S/linked"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a skill symlinked into the project folder was accepted"
+  in_out 'can write'; not_logged '^run '
+  # but a symlink to a folder elsewhere is mounted from its real path, and a neighbouring dir with a similar name is fine
+  sk; mkdir -p "$CASE/elsewhere/linked" "$PROJ-other/skills/near"; echo a > "$CASE/elsewhere/linked/SKILL.md"; echo a > "$PROJ-other/skills/near/SKILL.md"
+  ln -s "$CASE/elsewhere/linked" "$S/linked"; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $(cd "$CASE/elsewhere/linked" && pwd -P):/home/agent-pod/.claude/skills/linked:ro "
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$PROJ-other/skills" -- true; rc_is 0; logged "skills/near:/home/agent-pod/.claude/skills/near:ro "
+  # the skills folder itself counts too: the pod could add or swap entries in it, e.g. a symlink to any host dir with a SKILL.md
+  sk; mkdir -p "$PROJ/skills" "$CASE/elsewhere/x"; echo a > "$CASE/elsewhere/x/SKILL.md"; ln -s "$CASE/elsewhere/x" "$PROJ/skills/x"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$PROJ/skills" -- true; [ "$RC" != 0 ] || fail "a skills folder in the project with an outward symlink was accepted"
+  in_out 'AGENT_POD_SKILLS_DIR .* is in'; not_logged '^run '
+  ln -s "$PROJ/skills" "$CASE/lnk0"   # the same through a symlink: only the resolved folder shows where it is
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE/lnk0" -- true; [ "$RC" != 0 ] || fail "a symlink to a skills folder in the project, with outward skills, was accepted"
+  in_out 'AGENT_POD_SKILLS_DIR .* is in'; not_logged '^run '
+  sk; mkdir -p "$PROJ/skills/audit"; echo a > "$PROJ/skills/audit/SKILL.md"; ln -s "$PROJ/skills" "$CASE/lnk"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE/lnk" -- true; [ "$RC" != 0 ] || fail "a symlink to a skills folder in the project was accepted"
+  in_out 'can write'; not_logged '^run '
+  sk; PROJ="$CASE/top/proj"; mkdir -p "$PROJ" "$CASE/top/ok"; echo a > "$CASE/top/ok/SKILL.md"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$CASE/top" -- true; [ "$RC" != 0 ] || fail "a skills folder containing the project was accepted"
+  in_out 'AGENT_POD_SKILLS_DIR .* contains'; not_logged '^run '
+  # the config file is a writable mount too, and a symlink the user made for it is followed
+  sk; echo '{}' > "$S/audit/cfg.json"; mkdir -p "$H/config/agent-pod"; ln -s "$S/audit/cfg.json" "$H/config/agent-pod/claude.json"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a skill containing the symlinked config file was accepted"
+  in_out 'AGENT_POD_SKILLS_DIR .* contains'; not_logged '^run '
+  # a chain of config file links is followed up to 10 hops; a longer one cannot be checked and is refused, not half-checked
+  sk; echo '{}' > "$CASE/cfg.json"; mkdir -p "$H/config/agent-pod"; ln -s "$CASE/cfg.json" "$H/config/agent-pod/l11"
+  for i in 10 9 8 7 6 5 4 3 2; do ln -s "$H/config/agent-pod/l$((i + 1))" "$H/config/agent-pod/l$i"; done
+  ln -s "$H/config/agent-pod/l2" "$H/config/agent-pod/claude.json"
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; [ "$RC" != 0 ] || fail "a config file behind 11 symlinks was accepted"
+  in_out 'more than 10 symlinks'; not_logged '^run '
+  rm "$H/config/agent-pod/claude.json"; ln -s "$H/config/agent-pod/l3" "$H/config/agent-pod/claude.json"   # 10 links: followed to the end
+  AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  # each agent gets them where it reads its personal skills; goose's dir is one the launcher already mounts from the host
+  sk; AGENT=copilot launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.copilot/skills/audit:ro "; not_logged '\.claude/skills/'
+  # the dir above the mount points is made on the host by the launcher, not by Docker (as root)
+  [ -d "$H/.copilot-pod/skills" ] || fail "the skills dir in the state dir was not created by the launcher"
+  sk; AGENT=goose launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.agents/skills/audit:ro "; logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills "
+  not_logged '\.claude/skills/'
+}
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
   for a in claude copilot goose; do
@@ -1013,6 +1094,28 @@ run_mutants() {
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_skills_dir    '${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"}' '' || rc=1
+  mutate test_skills_dir    '$(basename "$_k"):ro")' '$(basename "$_k")")' || rc=1
+  mutate test_skills_dir    '    _r="$(cd "$_k" && pwd -P)" || continue' '    _r="${_k%/}"' || rc=1
+  mutate test_skills_dir    '    [ -f "${_k}SKILL.md" ] || continue' '    :' || rc=1
+  mutate test_skills_dir    '  [ -d "$AGENT_POD_SKILLS_DIR" ] || die' '  : || die' || rc=1
+  mutate test_skills_dir    '  [ "${#SKILLS_MOUNT[@]}" -gt 0 ] || die' '  : || die' || rc=1
+  mutate test_skills_dir    '  case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac' '  :' || rc=1
+  mutate test_skills_dir    '      case "$1/" in "$w"/*) die' '      case "$1/" in "$w"/_never_) die' || rc=1
+  mutate test_skills_dir    '      case "$w/" in "$1"/*) die' '      case "$w/" in "$1"/_never_) die' || rc=1
+  mutate test_skills_dir    '_wr=(); for _w in "$PWD" "$A_STATE_DIR"; do' '_wr=(); for _w in "$A_STATE_DIR"; do' || rc=1
+  mutate test_skills_dir    '_wr=(); for _w in "$PWD" "$A_STATE_DIR"; do' '_wr=(); for _w in "$PWD"; do' || rc=1
+  mutate test_skills_dir    '  for _d in $A_EXTRA_DIRS; do _wr+=(' '  for _d in; do _wr+=(' || rc=1
+  mutate test_skills_dir    '    while [ -L "$_f" ] && [ "$_n" -lt 10 ]; do' '    while false; do' || rc=1
+  mutate test_skills_dir    '    [ ! -L "$_f" ] || die "The config file' '    : || die "The config file' || rc=1
+  mutate test_skills_dir    '    _p="$(cd "$(dirname "$_f")" && pwd -P)" && _wr+=(' '    false && _wr+=(' || rc=1
+  mutate test_skills_dir    '  skills_overlap "$_s" "AGENT_POD_SKILLS_DIR"' '  :' || rc=1
+  mutate test_skills_dir    '  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" ||' '  _s="$AGENT_POD_SKILLS_DIR"; true ||' || rc=1
+  mutate test_skills_dir    '    skills_overlap "$_r" "The skill"' '    :' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.copilot/skills' 'A_SKILLS_TARGET=.claude/skills' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.agents/skills' 'A_SKILLS_TARGET=.claude/skills' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.claude/skills' 'A_SKILLS_TARGET=.claude/other' || rc=1
+  mutate test_skills_dir    'if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then' 'if false; then' || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
