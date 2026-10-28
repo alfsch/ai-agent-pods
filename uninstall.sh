@@ -25,7 +25,7 @@ printf '  %ssidecars:%s agent-pod-dind:* %s(DOCKER=1 sidecar images for a host u
 echo
 
 info "Will NOT remove"
-printf '  %snode:24-slim base image (docker rmi node:24-slim to clear)%s\n' "$DIM" "$RESET"
+printf '  %snode:26-slim base image (docker rmi node:26-slim to clear)%s\n' "$DIM" "$RESET"
 printf '  %sDocker build cache (docker builder prune to clear)%s\n' "$DIM" "$RESET"
 printf '  %sthis repo folder (delete it yourself)%s\n' "$DIM" "$RESET"
 echo
