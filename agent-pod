@@ -47,6 +47,7 @@ usage() {
   row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
   row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
   row "Git identity:"      "AGENT_POD_GITCONFIG=~/.gitconfig-work $HERE/agent-pod claude"
+  row "Extra skills:"      "AGENT_POD_SKILLS_DIR=~/skills $HERE/agent-pod claude"
   printf '\n'
   row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
   row ""                   "alias copilot-pod=$HERE/copilot-pod"
@@ -77,6 +78,7 @@ fi
 #                          shared ~/.agents is read-only in the image, so each is mounted from
 #                          ~/.config/agent-pod/<agent>-<last part of the dir>, outside the state dir for the same
 #                          reason as the config file
+#   A_SKILLS_TARGET        dir in HOME where AGENT_POD_SKILLS_DIR mounts its skills, one read-only mount per skill
 #   A_NOUPDATE             NAME=value that turns off the agent's own self-updater (empty: it has none)
 #   A_ENV                  further NAME=value pairs set in the pod
 #   A_FORWARD              host variables that are forwarded when set (token login)
@@ -86,14 +88,14 @@ case "$AGENT" in
   claude)
     A_NAME="Claude Code"; A_BIN=claude; A_SRC=npm; A_PKG=@anthropic-ai/claude-code; A_CHANNEL=stable
     A_VERSION_VAR=CLAUDE_CODE_VERSION; A_LEGACY_NO_UPDATE=CLAUDE_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills
+    A_STATE_DIR="$HOME/.claude-pod"; A_CFG_DIR=.claude; A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills; A_SKILLS_TARGET=.claude/skills
     A_NOUPDATE=DISABLE_AUTOUPDATER=1; A_ENV=
     A_FORWARD=; A_ROOT_ENV=IS_SANDBOX=1
     ;;
   copilot)
     A_NAME="Copilot CLI"; A_BIN=copilot; A_SRC=npm; A_PKG=@github/copilot; A_CHANNEL=latest
     A_VERSION_VAR=COPILOT_CLI_VERSION; A_LEGACY_NO_UPDATE=COPILOT_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills
+    A_STATE_DIR="$HOME/.copilot-pod"; A_CFG_DIR=.copilot; A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills; A_SKILLS_TARGET=.copilot/skills
     A_NOUPDATE=COPILOT_AUTO_UPDATE=false; A_ENV=
     A_FORWARD="COPILOT_GITHUB_TOKEN GH_TOKEN GITHUB_TOKEN"; A_ROOT_ENV=
     ;;
@@ -103,7 +105,7 @@ case "$AGENT" in
     # plugins go to ~/.agents/plugins whatever the XDG variables say, its global skills to ~/.agents/skills and its agent definitions to ~/.agents/agents.
     A_NAME="goose"; A_BIN=goose; A_SRC=github; A_PKG=aaif-goose/goose; A_CHANNEL=latest
     A_VERSION_VAR=GOOSE_VERSION; A_LEGACY_NO_UPDATE=AGENT_POD_NO_UPDATE
-    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=; A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"
+    A_STATE_DIR="$HOME/.goose-pod"; A_CFG_DIR=.goose; A_CFG_FILE=; A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"; A_SKILLS_TARGET=.agents/skills
     A_NOUPDATE=
     A_ENV="XDG_CONFIG_HOME=/home/agent-pod/.goose/config XDG_DATA_HOME=/home/agent-pod/.goose/data XDG_STATE_HOME=/home/agent-pod/.goose/state GOOSE_DISABLE_KEYRING=1 GH_CONFIG_DIR=/home/agent-pod/.config/gh"
     A_FORWARD="GOOSE_PROVIDER GOOSE_MODEL ANTHROPIC_API_KEY OPENAI_API_KEY GOOGLE_API_KEY OPENROUTER_API_KEY"; A_ROOT_ENV=
@@ -241,6 +243,23 @@ if [ -n "$_g" ]; then
     case "$_gd/" in "$_w"/*) die "The git config $_g is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
   done
   GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
+fi
+
+# AGENT_POD_SKILLS_DIR: a host folder of skills (<name>/SKILL.md), mounted read-only, one mount per skill so that the
+# agent's own skills in the same dir (Claude Code's synced/ among them) stay visible and the pod cannot change the host
+# copy. Docker leaves an empty <name> dir in the state dir as the mount point. A skill of the same name there is shadowed.
+SKILLS_MOUNT=()
+if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then
+  [ -d "$AGENT_POD_SKILLS_DIR" ] || die "AGENT_POD_SKILLS_DIR=$AGENT_POD_SKILLS_DIR is not a directory."
+  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" || die "Cannot use $AGENT_POD_SKILLS_DIR."
+  # Docker creates a missing mount-point dir as root: a state dir subfolder is made here, owned by the host user, so that
+  # the empty <name> dirs in it can be removed without sudo (the dir of goose is already made above).
+  case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac
+  for _k in "$_s"/*/; do
+    [ -f "${_k}SKILL.md" ] || continue
+    SKILLS_MOUNT+=(-v "${_k%/}:/home/agent-pod/$A_SKILLS_TARGET/$(basename "$_k"):ro")
+  done
+  [ "${#SKILLS_MOUNT[@]}" -gt 0 ] || die "AGENT_POD_SKILLS_DIR=$AGENT_POD_SKILLS_DIR holds no skill (a folder with a SKILL.md)."
 fi
 
 # Restrict to owner-only. The state dir holds the agent's auth token and session transcripts
@@ -566,6 +585,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
+  ${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"} \
   "$IMAGE" "$@")
 
 # Without the sidecar, exec so signals and the exit code pass straight through. With it we must stay

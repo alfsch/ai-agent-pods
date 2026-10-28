@@ -632,6 +632,37 @@ test_git_identity() {   # a git config of the user is the pod's global one: read
   # but a neighbouring directory with a similar name is fine
   gi; mkdir -p "$PROJ-other"; echo w > "$PROJ-other/gc"; launch AGENT_POD_GITCONFIG="$PROJ-other/gc" -- true; rc_is 0
 }
+test_skills_dir() {   # AGENT_POD_SKILLS_DIR: one read-only mount per skill of a host folder, at the skills dir of each agent
+  local S
+  sk() { setup_case; S="$(cd "$CASE" && pwd -P)/skills"; mkdir -p "$S/audit" "$S/review" "$S/not-a-skill"; echo a > "$S/audit/SKILL.md"; echo r > "$S/review/SKILL.md"; echo x > "$S/not-a-skill/notes.md"; echo f > "$S/file.md"; }
+  # unset: nothing is mounted there
+  sk; AGENT=claude launch -- true; rc_is 0; not_logged ':ro'; not_logged '\.claude/skills/'
+  # every folder with a SKILL.md, read-only, at the agent's skills dir; folders without one and plain files are left out
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.claude/skills/audit:ro "; logged " -v $S/review:/home/agent-pod/.claude/skills/review:ro "
+  [ -d "$H/.claude-pod/skills" ] || fail "the skills dir in the state dir was not created by the launcher"
+  not_logged 'not-a-skill'; not_logged 'file\.md'
+  # the state dir stays mounted as a whole, so the synced skills of the account are still there
+  logged " -v $H/.claude-pod:/home/agent-pod/.claude "
+  # a relative path (the launcher runs in the project folder) reaches Docker as an absolute one: a relative source is a volume name
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR=../skills -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.claude/skills/audit:ro "; not_logged ' -v \.\./'
+  # a path that is not a directory, or a folder without any skill, stops the launcher before anything is started
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_SKILLS_DIR was accepted"
+  in_out 'AGENT_POD_SKILLS_DIR='; not_logged '^run '
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/file.md" -- true; [ "$RC" != 0 ] || fail "a file as AGENT_POD_SKILLS_DIR was accepted"
+  not_logged '^run '
+  sk; AGENT=claude launch AGENT_POD_SKILLS_DIR="$S/not-a-skill" -- true; [ "$RC" != 0 ] || fail "a folder without skills was accepted"
+  in_out 'no skill'; not_logged '^run '
+  # each agent gets them where it reads its personal skills; goose's dir is one the launcher already mounts from the host
+  sk; AGENT=copilot launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.copilot/skills/audit:ro "; not_logged '\.claude/skills/'
+  # the dir above the mount points is made on the host by the launcher, not by Docker (as root)
+  [ -d "$H/.copilot-pod/skills" ] || fail "the skills dir in the state dir was not created by the launcher"
+  sk; AGENT=goose launch AGENT_POD_SKILLS_DIR="$S" -- true; rc_is 0
+  logged " -v $S/audit:/home/agent-pod/.agents/skills/audit:ro "; logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills "
+  not_logged '\.claude/skills/'
+}
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
   for a in claude copilot goose; do
@@ -1013,6 +1044,17 @@ run_mutants() {
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_skills_dir    '${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"}' '' || rc=1
+  mutate test_skills_dir    '/$(basename "$_k"):ro")' '/$(basename "$_k"))' || rc=1
+  mutate test_skills_dir    '    [ -f "${_k}SKILL.md" ] || continue' '    :' || rc=1
+  mutate test_skills_dir    '  _s="$(cd "$AGENT_POD_SKILLS_DIR" && pwd -P)" ||' '  _s="$AGENT_POD_SKILLS_DIR"; true ||' || rc=1
+  mutate test_skills_dir    '  [ -d "$AGENT_POD_SKILLS_DIR" ] || die' '  : || die' || rc=1
+  mutate test_skills_dir    '  [ "${#SKILLS_MOUNT[@]}" -gt 0 ] || die' '  : || die' || rc=1
+  mutate test_skills_dir    '  case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac' '  :' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.copilot/skills' 'A_SKILLS_TARGET=.claude/skills' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.agents/skills' 'A_SKILLS_TARGET=.claude/skills' || rc=1
+  mutate test_skills_dir    'A_SKILLS_TARGET=.claude/skills' 'A_SKILLS_TARGET=.claude/other' || rc=1
+  mutate test_skills_dir    'if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then' 'if false; then' || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
