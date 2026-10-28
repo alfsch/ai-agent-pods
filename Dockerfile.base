@@ -4,7 +4,7 @@
 # installed by each user's own build (see Dockerfile).
 # Pinned by digest and kept current by Renovate (see renovate.json), which also updates the tag literals in uninstall.sh
 # and the README; if you bump the tag by hand, update those too.
-FROM node:24-slim@sha256:be8204d4bd327363357f532187b752ff62759c31bedf98e9e18fc08c9cbd605c
+FROM node:26-slim@sha256:94816674c62774da0d099a947bf4613b9e1972a2733abd0d0cd80e795f8411d0
 
 # git/curl/less are baseline dev tools; jq and gh are reached for by the agents' built-in workflows
 # (JSON pipelines and the GitHub CLI for PRs/issues/releases). ca-certificates is needed for HTTPS.
