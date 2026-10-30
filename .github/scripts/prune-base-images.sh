@@ -9,12 +9,13 @@
 #   keep   the KEEP_TAGS newest hash tags (by when the version was pushed) and every hash tag pushed within KEEP_DAYS
 #          days, each with its children (read from the index) and its signature; KEEP_TAGS is at least 1, so the
 #          newest tag stays whatever its age
-#   keep   versions with a tag that is neither a hash nor a signature (somebody pushed them on purpose)
+#   keep   versions with a tag that is neither a hash nor a signature (somebody pushed them on purpose), whole: with
+#          their children and their signature
 #   keep   untagged versions younger than GRACE_HOURS: they may be the children of a publish that is still running
 #   delete older hash tags, the signatures of removed images and the untagged versions no kept image refers to
 #
-# It refuses to decide anything when no hash-tagged version is found or when the manifest list of a kept index could not
-# be read: then a child could be taken for an orphan. DRY_RUN is true unless it is exactly "false"; a dry run prints
+# It refuses to decide anything when no hash-tagged version is found or when the manifest list of a kept image (a
+# custom-tagged one included) could not be read: then a child could be taken for an orphan. DRY_RUN is true unless it is exactly "false"; a dry run prints
 # the plan and deletes nothing.
 #
 # Usage: prune-base-images.sh            lists the versions and the children of each index, prints the plan, deletes
@@ -52,12 +53,12 @@ decide() {
     | ($now - $grace_hours * 3600) as $grace
     | ($hashed | sort_by(ts) | reverse | to_entries
        | map(select(.key < $keep_tags or (.value | ts) >= $cutoff)) | map(.value)) as $kept
-    | ([$kept[] | select($ch[.name] == null) | .name]) as $unknown
+    | [$v[] | select(tags | any((hashtag or sigtag) | not))] as $others
+    | ([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown
     | if ($unknown | length) > 0 then error("the manifests of a kept index could not be read: " + ($unknown | join(" "))) else . end
     | ($kept | map(.name)) as $kept_names
-    | ($kept | map(.name | sig_of)) as $kept_sigs
-    | [$v[] | select(tags | any((hashtag or sigtag) | not))] as $others
-    | ([$kept[] | ($ch[.name] // [])[]] + [$others[] | ($ch[.name] // [])[]]) as $protected
+    | ([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs
+    | ([$kept[], $others[]] | map($ch[.name][]?)) as $protected
     | $v | sort_by(ts) | reverse | .[]
     | . as $x | tags as $t
     | (if ($t | any((hashtag or sigtag) | not)) then ["keep", "tag not set by the publish workflow: " + ($t | join(","))]
@@ -85,11 +86,12 @@ gh api --paginate "$API/versions?per_page=100" | jq -s 'add // []' > "$tmp/versi
 jq -e 'length > 0' "$tmp/versions.json" >/dev/null || { echo "no package versions found for $IMAGE: refusing to prune" >&2; exit 1; }
 echo "$(jq 'length' "$tmp/versions.json") versions of $IMAGE"
 
-# The children of every index (a hash-tagged version). One that cannot be read is left out; decide refuses when a kept
-# index is the one that is missing.
+# The children of every tagged image except the signatures: the indexes of the hash tags, and the images somebody tagged
+# otherwise, which are kept whole too (a single manifest has none). One that cannot be read is left out; decide refuses
+# when a kept one is the one that is missing.
 echo '{}' > "$tmp/children.json"
-for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | any(test("^[0-9a-f]{16}$"))) | .name' "$tmp/versions.json"); do
-  if kids="$(docker buildx imagetools inspect --raw "$IMAGE@$digest" 2>/dev/null | jq -ce '[.manifests[].digest]' 2>/dev/null)" && [ -n "$kids" ]; then
+for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)) | .name' "$tmp/versions.json"); do
+  if kids="$(docker buildx imagetools inspect --raw "$IMAGE@$digest" 2>/dev/null | jq -ce '[(.manifests // [])[].digest]' 2>/dev/null)" && [ -n "$kids" ]; then
     jq -c --arg d "$digest" --argjson k "$kids" '. + {($d): $k}' "$tmp/children.json" > "$tmp/children.next" && mv "$tmp/children.next" "$tmp/children.json"
   else
     echo "could not read the manifest list of $digest" >&2
