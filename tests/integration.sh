@@ -167,7 +167,7 @@ check "launcher pins a rootless dind image by digest" test -n "$PIN"
 if [ -n "$PIN" ]; then
   _t0=$SECONDS
   check "pull $PIN" bash -c 'for i in 1 2 3; do docker pull -q "$0" && exit 0; sleep 5; done; exit 1' "$PIN"
-  echo "     (pull of the sidecar image took $((SECONDS - _t0)) s)"
+  echo "     (pull of the sidecar image, retries included, took $((SECONDS - _t0)) s)"
   contract() { docker run --rm --entrypoint sh "$PIN" -c "$1"; }
   check "user rootless is 1000:1000 (the derived image renumbers exactly this)" contract "grep -q '^rootless:x:1000:1000:' /etc/passwd"
   check "group rootless is 1000" contract "grep -q '^rootless:x:1000:' /etc/group"
@@ -182,7 +182,7 @@ section "session: DOCKER=1 (rootless sidecar, mTLS, inner containers, project wr
 POD_SCRIPT='
 step() { local n="$1" out rc; shift; out="$("$@" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then echo "STEP ok $n"; else echo "STEP FAIL $n"; printf "%s\n" "$out" | tail -n 12 | sed "s/^/    | /"; fi; }
-pick() { local r i t=$SECONDS; for r in "$@"; do for i in 1 2 3; do docker pull -q "$r" >/dev/null 2>&1 && { IMG="$r"; echo "TIMING pull of $r in the sidecar took $((SECONDS - t)) s"; return 0; }; sleep 3; done; done; return 1; }
+pick() { local r i t; for r in "$@"; do for i in 1 2 3; do t=$SECONDS; docker pull -q "$r" >/dev/null 2>&1 && { IMG="$r"; echo "TIMING pull of $r in the sidecar took $((SECONDS - t)) s"; return 0; }; sleep 3; done; done; return 1; }
 info() { docker info >/dev/null 2>&1 && docker info -f "{{.SecurityOptions}}" | grep -q "name=rootless" && [ -n "$(docker info -f "{{.ServerVersion}}")" ]; }
 tls_env() { [ "$DOCKER_TLS_VERIFY" = 1 ] && [ "$DOCKER_HOST" = tcp://dind:2376 ]; }
 step docker-info-reports-rootless info
