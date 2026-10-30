@@ -56,7 +56,7 @@ BASE_IMAGE="$BASE_REPO:$(base_hash)"
 # If you rename the workflow, change this.
 SIGNER_ISSUER=https://token.actions.githubusercontent.com
 SIGNER_IDENTITY='^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
-COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign:v3.0.4@sha256:0b015a3557a64a751712da8a6395534160018eaaa2d969882a85a336de9adb70
+COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign:v3.1.4@sha256:0f06154836d2de34f887a5c273506d52ca43edaa1d9e53e6510fa78a48f69c2d
 
 # The build starts from the newest FROM image that can be pulled: a plain `docker build` would keep a local one, and
 # with it the Debian packages of the first build. A failed pull must not fail the install; a local copy is used (a
