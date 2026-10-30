@@ -1216,10 +1216,10 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
   # H: a tag pushed again is as young as that push, not as old as the version it points at
   prune_world; prune_img 1 24; prune_img 2 2880; prune_img 3 2880
   PRUNE_TOUCH_ID=2 PRUNE_TOUCH_H=48 prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101; prune_is delete 3 103
-  # I: an old hash-tagged index that a kept custom-tagged one refers to stays, with what is below it
+  # I: an old hash-tagged index that a kept custom-tagged one refers to stays, with what is below it and its signature
   prune_world; prune_img 1 24 1001; prune_img 3 2880 3001; PRUNE_TAG=latest prune_img 5 3000 3 3001
   prune_untagged 1001 24; prune_untagged 3001 2880
-  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 3001; prune_is delete 103
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 103 3001
   # D: nothing is decided without a hash-tagged version (a listing that failed must not delete the lot)
   prune_world; prune_untagged 7 48; prune_tagged 108 "$(prune_sig 99)" 100
   prune_decide; [ "$RC" != 0 ] || fail "a package without a hash-tagged version was decided on"
@@ -1553,7 +1553,8 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_run '[ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }' '[ "$failed" = 0 ] || true' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "tr '[:upper:]' '[:lower:]'" 'cat' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "jq -s 'add // []'" "jq -s '.[0] // []'" .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_decide '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown' '($kept | map(select($ch[.name] == null) | .name)) as $unknown' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run 'length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)' 'any(test("^[0-9a-f]{16}$"))' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);' '    def ts: (.created_at | fromdateiso8601);' .github/scripts/prune-base-images.sh || rc=1

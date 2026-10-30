@@ -59,8 +59,8 @@ decide() {
     | ([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown
     | if ($unknown | length) > 0 then error("the manifests of a kept index could not be read: " + ($unknown | join(" "))) else . end
     | ($kept | map(.name)) as $kept_names
-    | ([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs
     | ([$kept[], $others[]] | map($ch[.name][]?)) as $protected
+    | (([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs
     | $v | sort_by(ts) | reverse | .[]
     | . as $x | tags as $t
     | (if ($protected | any(. == $x.name)) then ["keep", "untagged", "part of a kept image"]
