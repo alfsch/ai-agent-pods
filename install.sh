@@ -12,6 +12,7 @@ die()  { err "$*"; trap - ERR; exit 1; }
 trap 'err "install.sh failed at line $LINENO"' ERR
 
 # Usage: install.sh [claude|copilot|goose|all]   (default: all)
+#        install.sh --verify-base <tag>   only checks the signature of the published base with that tag (see verify_base)
 # Pin a version with CLAUDE_CODE_VERSION=x.y.z, COPILOT_CLI_VERSION=x.y.z or GOOSE_VERSION=x.y.z (for the agent named on the command
 # line). The launcher calls this by itself when the image of an agent is missing or outdated.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +33,7 @@ WHICH="${1:-all}"
 case "$WHICH" in
   claude|copilot|goose) AGENTS=("$WHICH") ;;
   all)                  AGENTS=(claude copilot goose) ;;
+  --verify-base)        AGENTS=() ;;
   *)                    die "Unknown agent '$WHICH'. Use claude, copilot, goose or all." ;;
 esac
 
@@ -46,14 +48,15 @@ DEFAULT_BASE_REPO=ghcr.io/alfsch/agent-pod-base
 BASE_REPO="${AGENT_POD_BASE_REPO:-$DEFAULT_BASE_REPO}"
 BASE_IMAGE="$BASE_REPO:$(base_hash)"
 
-# publish-base.yaml signs the published base keylessly with cosign (Sigstore). A pulled base is verified when cosign is
-# installed: the signature must come from that workflow on main of this repository, so an image pushed by hand or by
-# another workflow is not used (the base is built here instead). Only the default repository is checked: a fork's
-# signer is not this one. AGENT_POD_REQUIRE_SIGNED_BASE=1 also refuses a pulled base that cannot be verified, for
-# lack of cosign included. AGENT_POD_COSIGN names another cosign binary. If you rename the workflow, change this.
+# publish-base.yaml signs the published base keylessly with cosign (Sigstore). A pulled base is verified: the signature must
+# come from that workflow on main of this repository, so an image pushed by hand or by another workflow is not used (the base
+# is built here instead). cosign runs as a container pinned by digest (Renovate keeps it current), so Docker is all it
+# takes. Only the default repository is checked: a fork's signer is not this one. If cosign cannot run (the image cannot be
+# pulled, no daemon) the base is used with a warning; AGENT_POD_REQUIRE_SIGNED_BASE=1 refuses it then.
+# If you rename the workflow, change this.
 SIGNER_ISSUER=https://token.actions.githubusercontent.com
 SIGNER_IDENTITY='^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
-COSIGN="${AGENT_POD_COSIGN:-cosign}"
+COSIGN_IMAGE=ghcr.io/sigstore/cosign/cosign:v3.0.4@sha256:0b015a3557a64a751712da8a6395534160018eaaa2d969882a85a336de9adb70
 
 # The build starts from the newest FROM image that can be pulled: a plain `docker build` would keep a local one, and
 # with it the Debian packages of the first build. A failed pull must not fail the install; a local copy is used (a
@@ -87,25 +90,33 @@ build_base() {
 # and then BASE_IMAGE becomes that digest, so the agent images are built from the bytes that were checked and not from
 # whatever the tag points at by then (another install running at the same time can retag it).
 verify_base() {
-  local ref out
+  local ref out rc
   if [ "$BASE_REPO" != "$DEFAULT_BASE_REPO" ]; then
     printf '%s  Not verified: %s is not the default repository.%s\n' "$DIM" "$BASE_REPO" "$RESET"
     [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return
   fi
-  if ! command -v "$COSIGN" >/dev/null 2>&1; then
-    printf '%s  Not verified: cosign is not installed (it checks that CI built this image).%s\n' "$DIM" "$RESET"
-    [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return
-  fi
   ref="$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$BASE_IMAGE" 2>/dev/null \
     | awk -v repo="$BASE_REPO@" 'index($0, repo) == 1 { print; exit }')"
-  if out="$("$COSIGN" verify --certificate-oidc-issuer "$SIGNER_ISSUER" --certificate-identity-regexp "$SIGNER_IDENTITY" \
+  # the image's own user has no home: the cache cosign writes (Sigstore's trust root) goes to a throwaway /tmp
+  if out="$(docker run --rm --read-only --tmpfs /tmp -e HOME=/tmp "$COSIGN_IMAGE" verify \
+        --certificate-oidc-issuer "$SIGNER_ISSUER" --certificate-identity-regexp "$SIGNER_IDENTITY" \
         "${ref:-$BASE_IMAGE}" 2>&1 >/dev/null)"; then
     ok "Base image signature verified"
     [ -z "$ref" ] || BASE_IMAGE="$ref"
+    return 0
   else
-    printf '%s  Signature check failed (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
-    return 1
+    rc=$?
   fi
+  # No verdict only when Docker itself could not run the image (125-127: no pull, no daemon). What cosign prints is not
+  # looked at: it can echo fields of the image's signature bundle, so a text like "dial tcp" in it is no proof of an outage.
+  # Every failure of cosign, a Sigstore that cannot be reached included, therefore counts as a failed check.
+  case "$rc" in
+    125|126|127)
+      printf '%s  Not verified: cosign could not run (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+      [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return ;;
+  esac
+  printf '%s  Signature check failed (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
+  return 1
 }
 
 ensure_base() {
@@ -126,6 +137,17 @@ ensure_base() {
     build_base
   fi
 }
+# --verify-base <tag>: nothing is built; the published base with that tag is pulled and checked, strictly: a check that
+# could not run fails too. CI uses it to see that the cosign invocation still works (a pull request that breaks it would
+# otherwise only fall back to building the base).
+if [ "$WHICH" = --verify-base ]; then
+  [ -n "${2:-}" ] || die "--verify-base needs the tag of the base image."
+  BASE_IMAGE="$BASE_REPO:$2"; AGENT_POD_REQUIRE_SIGNED_BASE=1
+  info "Pulling the base image '$BASE_IMAGE'"
+  docker pull "$BASE_IMAGE" >/dev/null || die "Could not pull $BASE_IMAGE."
+  verify_base || exit 1
+  exit 0
+fi
 ensure_base
 
 # Builds agent-pod:<agent>. The agent-specific values are the same ones as in the launcher's table.

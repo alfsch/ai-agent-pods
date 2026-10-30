@@ -77,9 +77,15 @@ test that fails without it.
   not `docker build --pull`, which fails hard. A change to `Dockerfile.base` or `pod-environment.md` reaches users only
   after `publish-base.yaml` has run on `main`; until then the pull fails and they build it. Pull requests build it
   locally, they cannot publish.
-- The published base is signed by `publish-base.yaml` (cosign, keyless) and `install.sh` verifies it when cosign is
-  installed; a failed check builds the base locally instead of using the pulled image, a missing cosign only warns
-  (Docker stays the one requirement) unless `AGENT_POD_REQUIRE_SIGNED_BASE=1`. The signer identity in `install.sh`
+- The published base is signed by `publish-base.yaml` (cosign, keyless) and `install.sh` verifies it with cosign
+  run as a container (`COSIGN_IMAGE`, pinned by digest, kept current by Renovate; a new major is not auto-merged). Docker
+  stays the one requirement: no host cosign. A failed check builds the base locally instead of using the pulled image; if
+  Docker cannot run it (exit 125-127 of `docker run`: no pull, no daemon) it only warns, unless
+  `AGENT_POD_REQUIRE_SIGNED_BASE=1`. Anything cosign itself fails with is a failed check, a Sigstore that cannot be
+  reached included: its output is never matched against text, because it echoes fields of the signature bundle that an
+  attacker controls. Pull requests build the base when it is not published, which passes with a broken invocation, so
+  `integration-tests.yaml` runs `install.sh --verify-base <tag>` on a published base (the newest one that pulls and verifies, `tests/published-base-tag.sh`: on a push to main the publish run is not done yet; and the same with a wrong signer
+  identity, which must fail) to vouch for a cosign update. The signer identity in `install.sh`
   (`SIGNER_IDENTITY`) names the workflow file and `refs/heads/main`: renaming the workflow means changing both, and a
   base published from another branch is rightly rejected. Only the default repository is checked. After a successful
   check `BASE_IMAGE` is the verified digest, so the agent images are built from the bytes that were checked and not
