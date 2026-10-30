@@ -1151,7 +1151,8 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
 
 # The world of the prune tests: img <n> <age in hours> <child digest numbers>... registers the image with the hash tag
 # H<n> (index digest n; PRUNE_TAG=<tag> gives it that tag instead), its signature version (tag SIG<n>) and the children it lists; untagged <id> <age> adds a
-# version nobody tags (a child, or an orphan). Ids of the untagged versions are their digest numbers.
+# version nobody tags (a child, or an orphan). PRUNE_TOUCH_ID=<id> PRUNE_TOUCH_H=<hours> make that version's updated_at that
+# many hours old while its created_at stays as it is (a tag that was pushed again). Ids of the untagged versions are their digest numbers.
 prune_world() { SPEC=; CH='{}'; NOWV=2000000000; command -v jq >/dev/null 2>&1 || fail "the prune tests need jq"; }
 prune_dg() { printf 'sha256:%064d' "$1"; }
 prune_sig() { printf 'sha256-%064d.sig' "$1"; }
@@ -1174,8 +1175,9 @@ prune_versions() {   # the package versions as the API returns them, from SPEC
     esac
     out="$out$id	$dg	$age	$tags"$'\n'
   done <<<"$SPEC"
-  printf '%s' "$out" | jq -Rn --argjson now "$NOWV" '[inputs | split("\t") | {id: (.[0] | tonumber), name: .[1],
-    created_at: ($now - (.[2] | tonumber) * 3600 | todate), metadata: {container: {tags: (.[3] | split(" ") | map(select(length > 0)))}}}]'
+  printf '%s' "$out" | jq -Rn --argjson now "$NOWV" --arg touch_id "${PRUNE_TOUCH_ID:-}" --argjson touch_h "${PRUNE_TOUCH_H:-0}" '[inputs | split("\t") | {id: (.[0] | tonumber), name: .[1],
+    created_at: ($now - (.[2] | tonumber) * 3600 | todate), updated_at: ($now - (.[2] | tonumber) * 3600 | todate), metadata: {container: {tags: (.[3] | split(" ") | map(select(length > 0)))}}}]
+    | map(if (.id | tostring) == $touch_id then .updated_at = ($now - $touch_h * 3600 | todate) else . end)'
 }
 prune_decide() {   # prune_decide <VAR=value>... : the plan for the world, in OUT; RC is the exit code
   RC=0; OUT="$(jq -n --argjson v "$(prune_versions)" --argjson c "$CH" '{versions: $v, children: $c}' | env NOW="$NOWV" "$@" "$PRUNE" decide 2>"$CASE/err")" || RC=$?
@@ -1211,6 +1213,9 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
   # C: the newest tag stays whatever its age
   prune_world; prune_img 1 2160; prune_img 2 2880
   prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101; prune_is delete 2 102
+  # H: a tag pushed again is as young as that push, not as old as the version it points at
+  prune_world; prune_img 1 24; prune_img 2 2880; prune_img 3 2880
+  PRUNE_TOUCH_ID=2 PRUNE_TOUCH_H=48 prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101; prune_is delete 3 103
   # D: nothing is decided without a hash-tagged version (a listing that failed must not delete the lot)
   prune_world; prune_untagged 7 48; prune_tagged 108 "$(prune_sig 99)" 100
   prune_decide; [ "$RC" != 0 ] || fail "a package without a hash-tagged version was decided on"
@@ -1231,15 +1236,17 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
 }
 
 test_prune_run() {   # the script lists, decides, and deletes only when DRY_RUN is exactly false
-  local d bin
+  local d bin leaf
   setup_case; d="$CASE/prune"; bin="$d/bin"; mkdir -p "$bin" "$d/manifests"
   prune_world; prune_img 1 24 1001; prune_img 2 2880 2001; prune_untagged 1001 24; prune_untagged 2001 2880
-  PRUNE_TAG=latest prune_img 3 2880 3001; prune_untagged 3001 2880   # a custom-tagged image with old children: kept whole
+  PRUNE_TAG=latest prune_img 3 2880 3001; prune_untagged 3001 2880; prune_untagged 3002 2880   # a custom-tagged image with old children, nested: kept whole
   local versions; versions="$(prune_versions)"
   jq -c '.[:3]' <<<"$versions" > "$d/page1.json"; jq -c '.[3:]' <<<"$versions" > "$d/page2.json"   # two pages, as --paginate prints them
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 1001)" > "$d/manifests/$(prune_dg 1)"
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 2001)" > "$d/manifests/$(prune_dg 2)"
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3001)" > "$d/manifests/$(prune_dg 3)"
+  printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3002)" > "$d/manifests/$(prune_dg 3001)"   # an index below an index
+  for leaf in 1001 2001 3002; do printf '{"schemaVersion":2}' > "$d/manifests/$(prune_dg "$leaf")"; done
   cat >"$bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/gh.log"
@@ -1273,13 +1280,16 @@ STUB
   pr DRY_RUN=false; rc_is 0
   [ "$(deletes)" = 3 ] || fail "expected 3 deletions, got $(deletes)"
   for id in 2 102 2001; do grep -q -- "-X DELETE /users/Owner/packages/container/agent-pod-base/versions/$id\$" "$d/gh.log" || fail "version $id was not deleted"; done
-  for id in 3 103 3001; do ! grep -q -- "-X DELETE .*/versions/$id\$" "$d/gh.log" || fail "version $id of the custom-tagged image was deleted"; done
+  for id in 3 103 3001 3002; do ! grep -q -- "-X DELETE .*/versions/$id\$" "$d/gh.log" || fail "version $id of the custom-tagged image was deleted"; done
   # the manifest list of a kept index cannot be read: nothing is deleted
   pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 1)"; [ "$RC" != 0 ] || fail "a kept index with an unreadable manifest list did not stop the run"
   [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a kept index were unknown"
   # nor when the manifest list of the custom-tagged image cannot be read
   pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3)"; [ "$RC" != 0 ] || fail "a custom-tagged image with an unreadable manifest list did not stop the run"
   [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a custom-tagged image were unknown"
+  # nor when something below it cannot be read
+  pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3002)"; [ "$RC" != 0 ] || fail "an unreadable manifest below a custom-tagged image did not stop the run"
+  [ "$(deletes)" = 0 ] || fail "something was deleted although a manifest below a custom-tagged image was unknown"
   # one deletion fails: the others are still tried, and the run fails
   pr DRY_RUN=false STUB_DELETE_FAIL=102; rc_is 1; [ "$(deletes)" = 3 ] || fail "a failed deletion stopped the others"
 }
@@ -1539,6 +1549,9 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_decide '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown' '($kept | map(select($ch[.name] == null) | .name)) as $unknown' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run 'length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)' 'any(test("^[0-9a-f]{16}$"))' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);' '    def ts: (.created_at | fromdateiso8601);' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; done' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; descend "$k" || true; done' .github/scripts/prune-base-images.sh || rc=1
   return $rc
 }
 

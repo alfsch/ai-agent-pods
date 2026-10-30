@@ -6,7 +6,8 @@
 # and the cosign signature (a version tagged sha256-<hex of the index digest>.sig). A rule such as "delete the untagged
 # versions" would remove the children of images that are still in use, so whole images are kept or removed:
 #
-#   keep   the KEEP_TAGS newest hash tags (by when the version was pushed) and every hash tag pushed within KEEP_DAYS
+#   keep   the KEEP_TAGS newest hash tags (by when the version was last pushed: the later of created_at and updated_at,
+#          so a tag moved to an old digest is not taken for an old one) and every hash tag pushed within KEEP_DAYS
 #          days, each with its children (read from the index) and its signature; KEEP_TAGS is at least 1, so the
 #          newest tag stays whatever its age
 #   keep   versions with a tag that is neither a hash nor a signature (somebody pushed them on purpose), whole: with
@@ -40,7 +41,7 @@ decide() {
   jq -r --argjson now "${NOW:-$(date +%s)}" --argjson keep_tags "$KEEP_TAGS" --argjson keep_days "$KEEP_DAYS" \
     --argjson grace_hours "$GRACE_HOURS" '
     def tags: (.metadata.container.tags // []);
-    def ts: (.created_at | fromdateiso8601);
+    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);
     def hashtag: test("^[0-9a-f]{16}$");
     def sigtag: test("^sha256-[0-9a-f]{64}\\.sig$");
     def sig_of: "sha256-" + ltrimstr("sha256:") + ".sig";
@@ -86,15 +87,25 @@ gh api --paginate "$API/versions?per_page=100" | jq -s 'add // []' > "$tmp/versi
 jq -e 'length > 0' "$tmp/versions.json" >/dev/null || { echo "no package versions found for $IMAGE: refusing to prune" >&2; exit 1; }
 echo "$(jq 'length' "$tmp/versions.json") versions of $IMAGE"
 
-# The children of every tagged image except the signatures: the indexes of the hash tags, and the images somebody tagged
+# Every digest below an image (an index lists images, which may be indexes themselves), depth first. Fails when a manifest
+# on the way cannot be read: a descendant that is not known would be taken for an orphan.
+descend() {
+  local raw kids k
+  raw="$(docker buildx imagetools inspect --raw "$IMAGE@$1" 2>/dev/null)" || return 1
+  kids="$(printf '%s' "$raw" | jq -r '(.manifests // [])[].digest' 2>/dev/null)" || return 1
+  for k in $kids; do echo "$k"; descend "$k" || return 1; done
+}
+
+# What is below every tagged image except the signatures: the indexes of the hash tags, and the images somebody tagged
 # otherwise, which are kept whole too (a single manifest has none). One that cannot be read is left out; decide refuses
 # when a kept one is the one that is missing.
 echo '{}' > "$tmp/children.json"
 for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)) | .name' "$tmp/versions.json"); do
-  if kids="$(docker buildx imagetools inspect --raw "$IMAGE@$digest" 2>/dev/null | jq -ce '[(.manifests // [])[].digest]' 2>/dev/null)" && [ -n "$kids" ]; then
+  if list="$(descend "$digest")"; then
+    kids="$(printf '%s\n' "$list" | jq -Rnc '[inputs | select(length > 0)]')"
     jq -c --arg d "$digest" --argjson k "$kids" '. + {($d): $k}' "$tmp/children.json" > "$tmp/children.next" && mv "$tmp/children.next" "$tmp/children.json"
   else
-    echo "could not read the manifest list of $digest" >&2
+    echo "could not read the manifests below $digest" >&2
   fi
 done
 
