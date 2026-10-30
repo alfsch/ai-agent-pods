@@ -7,7 +7,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
-FILES=(agent-pod install.sh uninstall.sh tests/check.sh tests/stubbed-docker.sh tests/integration.sh)
+FILES=(agent-pod install.sh uninstall.sh tests/check.sh tests/stubbed-docker.sh tests/integration.sh tests/published-base-tag.sh)
 # Pinned, so that a new ShellCheck version cannot fail a pull request on its own.
 SHELLCHECK_IMAGE=koalaman/shellcheck:v0.10.0
 

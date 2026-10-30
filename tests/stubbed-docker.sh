@@ -12,6 +12,7 @@ BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
 UNINSTALLER="${UNINSTALLER:-$ROOT/uninstall.sh}"
 ITEST="${ITEST:-$ROOT/tests/integration.sh}"
+PUBTAG="${PUBTAG:-$ROOT/tests/published-base-tag.sh}"   # picks the published base that integration-tests.yaml verifies
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
@@ -44,6 +45,7 @@ AGENT="${AGENT-claude}"
 #   STUB_POD_STDIN=1      the pod stores its stdin in $STUB_DIR/pod-stdin
 #   STUB_NO_IMAGE=1       the agent image is missing until the stub install.sh ran
 #   STUB_DERIVED_EXISTS=1 the derived sidecar image already exists; STUB_BUILD_FAIL=1 `docker build` fails
+#   STUB_PUBLISHED="t1 t2" the tags `docker manifest inspect` finds (the others are not in the registry)
 #   STUB_PULL_FAIL=1      `docker pull` fails like a registry rate limit
 #   STUB_INDEX_JSON=x     what `buildx imagetools create --dry-run` prints (the index to be pushed); STUB_INSPECT_FAIL=1 makes
 #                         `imagetools inspect <ref>@sha256:...` fail; looking a tag up gives a digest that is not the created one
@@ -86,6 +88,7 @@ case "$1" in
     esac
     exit 0 ;;
   network) [ "$2" = rm ] && sleep "${STUB_NETRM_SLEEP:-0}"; exit 0 ;;
+  manifest) [[ " ${STUB_PUBLISHED:-} " == *":${3##*:} "* || " ${STUB_PUBLISHED:-} " == *" ${3##*:} "* ]]; exit ;;
   volume)
     case "$2" in
       ls) [ -z "${STUB_VOLUMES:-}" ] || echo "$STUB_VOLUMES"; exit 0 ;;   # the volumes the daemon lists (one name)
@@ -1039,6 +1042,38 @@ test_verify_base_mode() {   # install.sh --verify-base <tag>: only the check, an
   vb --; rc_is 1; in_out 'needs the tag'; not_logged '^pull'
 }
 
+test_published_base_tag() {   # the base that is verified in CI exists in the registry, also right after a push to main
+  local d t_tree t_c2 t_c1 t_head
+  pt() {   # pt <VAR=value>... : the script in the repository of the case, with the tags in STUB_PUBLISHED published
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" REF=HEAD "$@" "$PUBTAG" >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"; chmod +x "$d/install.sh"
+  git_() { git -C "$d" -c user.name=t -c user.email=t@t.invalid -c commit.gpgsign=false "$@"; }
+  git_ init -q
+  local n=0 tag
+  for n in 1 2; do   # two commits that change the base, one that does not, then the one that has just been pushed
+    printf 'FROM node:%s-slim\n' "$n" > "$d/Dockerfile.base"; printf 'env\n' > "$d/pod-environment.md"
+    git_ add -A; git_ commit -q -m "base $n"; eval "t_c$n=$(cd "$d" && ./install.sh --base-hash)"
+  done
+  # many commits that do not touch the base (the history that is looked at is limited, so they must not count)
+  for n in $(seq 1 31); do git_ commit -q --allow-empty -m "unrelated $n"; done
+  printf 'FROM node:3-slim\n' > "$d/Dockerfile.base"; git_ add -A; git_ commit -q -m "base 3"; t_head="$(cd "$d" && ./install.sh --base-hash)"
+  # published: used as it is
+  pt STUB_PUBLISHED="$t_head $t_c2 $t_c1"; rc_is 0; [ "$(cat "$CASE/out")" = "$t_head" ] || fail "not the tag of the tree: $(cat "$CASE/out")"
+  # not yet published (the publish workflow runs next to the tests): the newest earlier one that is, not an older one
+  pt STUB_PUBLISHED="$t_c2 $t_c1"; rc_is 0; [ "$(cat "$CASE/out")" = "$t_c2" ] || fail "not the newest published tag: $(cat "$CASE/out")"
+  pt STUB_PUBLISHED="$t_c1"; rc_is 0; [ "$(cat "$CASE/out")" = "$t_c1" ] || fail "not the older published tag: $(cat "$CASE/out")"
+  # the checked-out tree (a pull request) comes before anything of the branch
+  printf 'FROM node:4-slim\n' > "$d/Dockerfile.base"; t_tree="$(cd "$d" && ./install.sh --base-hash)"
+  pt STUB_PUBLISHED="$t_tree $t_head"; rc_is 0; [ "$(cat "$CASE/out")" = "$t_tree" ] || fail "not the tag of the checked-out tree: $(cat "$CASE/out")"
+  pt STUB_PUBLISHED="$t_head"; rc_is 0; [ "$(cat "$CASE/out")" = "$t_head" ] || fail "an unpublished tree did not fall back: $(cat "$CASE/out")"
+  # nothing published
+  pt STUB_PUBLISHED=; rc_is 1; in_out 'no published base image'
+  tag="$(cat "$CASE/out")"; [ -z "$tag" ] || fail "a tag was printed although none is published: $tag"
+  # the registry is the one that is asked for
+  : > "$STUB_LOG"; pt STUB_PUBLISHED="$t_head" AGENT_POD_BASE_REPO=test.invalid/base; rc_is 0; logged '^manifest inspect test.invalid/base:'; not_logged 'ghcr.io'
+}
+
 test_agent_install_layer() {   # the install layer of Dockerfile runs the agent and reinstalls when it does not start
   local d body
   # the RUN instruction that installs the agent, as one shell command (its lines end with a backslash)
@@ -1111,7 +1146,7 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -1308,6 +1343,16 @@ run_mutants() {
   mutate test_base_signature '    125|126|127)' '    125|126)' install.sh || rc=1
   mutate test_base_signature '    125|126|127)' '    125|127)' install.sh || rc=1
   mutate test_base_signature 'cosign/cosign:' 'cosign/cosign#' install.sh || rc=1
+  mutate test_published_base_tag 'if published "$tag"; then echo "$tag"; exit 0; fi
+
+tmp=' 'tmp=' tests/published-base-tag.sh || rc=1
+  mutate test_published_base_tag '  if published "$tag"; then echo "$tag"; exit 0; fi
+done' '  echo "$tag"; exit 0
+done' tests/published-base-tag.sh || rc=1
+  mutate test_published_base_tag 'git log --format=%H -n 30 "$REF"' 'git log --reverse --format=%H -n 30 "$REF"' tests/published-base-tag.sh || rc=1
+  mutate test_published_base_tag 'exit 1' 'exit 0' tests/published-base-tag.sh || rc=1
+  mutate test_published_base_tag 'REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"' 'REPO=ghcr.io/alfsch/agent-pod-base' tests/published-base-tag.sh || rc=1
+  mutate test_published_base_tag ' -- Dockerfile.base pod-environment.md)' ')' tests/published-base-tag.sh || rc=1
   mutate test_verify_base_mode '  BASE_IMAGE="$BASE_REPO:$2"; AGENT_POD_REQUIRE_SIGNED_BASE=1' '  BASE_IMAGE="$BASE_REPO:$2"' install.sh || rc=1
   mutate test_verify_base_mode '  verify_base || exit 1
   exit 0' '  verify_base || true

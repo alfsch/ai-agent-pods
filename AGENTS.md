@@ -84,7 +84,7 @@ test that fails without it.
   `AGENT_POD_REQUIRE_SIGNED_BASE=1`. Anything cosign itself fails with is a failed check, a Sigstore that cannot be
   reached included: its output is never matched against text, because it echoes fields of the signature bundle that an
   attacker controls. Pull requests build the base when it is not published, which passes with a broken invocation, so
-  `integration-tests.yaml` runs `install.sh --verify-base <tag>` on a published base (and the same with a wrong signer
+  `integration-tests.yaml` runs `install.sh --verify-base <tag>` on a published base (the newest one that exists, `tests/published-base-tag.sh`: on a push to main the publish run is not done yet; and the same with a wrong signer
   identity, which must fail) to vouch for a cosign update. The signer identity in `install.sh`
   (`SIGNER_IDENTITY`) names the workflow file and `refs/heads/main`: renaming the workflow means changing both, and a
   base published from another branch is rightly rejected. Only the default repository is checked. After a successful
