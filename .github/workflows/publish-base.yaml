@@ -150,21 +150,29 @@ jobs:
         run: |
           cosign sign --yes "$IMAGE@$DIGEST"
 
-  # Vulnerability report for the digest that was just signed (both architectures, since it is the index). Report only:
-  # exit-code 0 and the table goes to the job summary. Unfixed CVEs are left out, they cannot be acted on.
+  # Vulnerability report for the digest that was just signed. Trivy scans one platform of an index (the host's by
+  # default), so both are named. Report only: exit-code 0 keeps findings from failing the job, continue-on-error keeps
+  # a scanner, database or registry error from failing the workflow after the image is published. The table goes to the
+  # job summary. Unfixed CVEs are left out, they cannot be acted on.
   scan:
     needs: merge
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    continue-on-error: true
     permissions:
       contents: read
       packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
     steps:
       - name: Trivy scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_USERNAME: ${{ github.actor }}
           TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TRIVY_PLATFORM: ${{ matrix.platform }}
         with:
           image-ref: ${{ env.IMAGE }}@${{ needs.merge.outputs.digest }}
           format: table
@@ -173,13 +181,15 @@ jobs:
           ignore-unfixed: true
           exit-code: "0"
       - name: Report in the job summary
+        if: ${{ !cancelled() }}
         env:
           DIGEST: ${{ needs.merge.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
           {
-            echo "### Trivy: $IMAGE@$DIGEST"
+            echo "### Trivy: $IMAGE@$DIGEST ($PLATFORM)"
             echo '```'
-            cat trivy-report.txt
+            cat trivy-report.txt 2>/dev/null || echo "no report: the scan did not finish"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
