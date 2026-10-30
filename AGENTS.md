@@ -77,9 +77,11 @@ test that fails without it.
   not `docker build --pull`, which fails hard. A change to `Dockerfile.base` or `pod-environment.md` reaches users only
   after `publish-base.yaml` has run on `main`; until then the pull fails and they build it. Pull requests build it
   locally, they cannot publish.
-- The published base is signed by `publish-base.yaml` (cosign, keyless) and `install.sh` verifies it when cosign is
-  installed; a failed check builds the base locally instead of using the pulled image, a missing cosign only warns
-  (Docker stays the one requirement) unless `AGENT_POD_REQUIRE_SIGNED_BASE=1`. The signer identity in `install.sh`
+- The published base is signed by `publish-base.yaml` (cosign, keyless) and `install.sh` verifies it with cosign
+  run as a container (`COSIGN_IMAGE`, pinned by digest, kept current by Renovate; a new major is not auto-merged). Docker
+  stays the one requirement: no host cosign. A failed check builds the base locally instead of using the pulled image; if
+  cosign cannot run (exit 125-127 of `docker run`, or a network error in its output) it only warns, unless
+  `AGENT_POD_REQUIRE_SIGNED_BASE=1`. Anything else that fails is a failed check. The signer identity in `install.sh`
   (`SIGNER_IDENTITY`) names the workflow file and `refs/heads/main`: renaming the workflow means changing both, and a
   base published from another branch is rightly rejected. Only the default repository is checked. After a successful
   check `BASE_IMAGE` is the verified digest, so the agent images are built from the bytes that were checked and not

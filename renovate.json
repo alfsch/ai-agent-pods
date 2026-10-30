@@ -19,6 +19,14 @@
       "matchStrings": ["(?<depName>docker):(?<currentValue>[\\w.-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
       "datasourceTemplate": "docker",
       "versioningTemplate": "docker"
+    },
+    {
+      "description": "Keep the digest-pinned cosign image that install.sh verifies the base signature with current",
+      "customType": "regex",
+      "managerFilePatterns": ["/^install\\.sh$/"],
+      "matchStrings": ["COSIGN_IMAGE=(?<depName>ghcr\\.io/sigstore/cosign/cosign):(?<currentValue>[\\w.-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "docker"
     }
   ],
   "packageRules": [
@@ -48,11 +56,23 @@
       "pinDigests": true
     },
     {
+      "description": "Pin the digest of the cosign image that verifies the base signature",
+      "matchDepNames": ["ghcr.io/sigstore/cosign/cosign"],
+      "matchDatasources": ["docker"],
+      "pinDigests": true
+    },
+    {
       "description": "Merge updates of the tooling images (docker CLI, DIND sidecar, node base image, yq), majors included, once the required stub-tests and integration-tests checks pass; the integration tests are what vouches for them. No minimumReleaseAge: Renovate has no release timestamps for these docker updates, and with timestamp-required it would hold them back forever",
       "matchDatasources": ["docker"],
       "automerge": true,
       "automergeType": "pr",
       "automergeStrategy": "squash"
+    },
+    {
+      "description": "A new major of cosign can change the flags or the verification itself, and no check on the pull request runs a verification (the integration tests build the base there when it changed): a person reviews it",
+      "matchDepNames": ["ghcr.io/sigstore/cosign/cosign"],
+      "matchUpdateTypes": ["major"],
+      "automerge": false
     },
     {
       "description": "Merge GitHub Actions updates once the required stub-tests check passes, but not before a release is 3 days old; main only accepts squash merges",
