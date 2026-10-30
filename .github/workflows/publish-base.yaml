@@ -153,7 +153,8 @@ jobs:
   # Vulnerability report for the digest that was just signed. Trivy scans one platform of an index (the host's by
   # default), so both are named. Report only: exit-code 0 keeps findings from failing the job, continue-on-error keeps
   # a scanner, database or registry error from failing the workflow after the image is published. The table goes to the
-  # job summary. Unfixed CVEs are left out, they cannot be acted on.
+  # job summary and, through tee, to the job log, which is what `gh run view --log` and the API can read (the API has no
+  # endpoint for summaries). Unfixed CVEs are left out, they cannot be acted on.
   scan:
     needs: merge
     runs-on: ubuntu-latest
@@ -191,7 +192,7 @@ jobs:
             echo '```'
             cat trivy-report.txt 2>/dev/null || echo "no report: the scan did not finish"
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
   # What users do: install.sh pulls the published tag. Runs on both architectures, on a clean runner with no local copy.
   smoke:
