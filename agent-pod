@@ -118,13 +118,12 @@ IMAGE="agent-pod:$AGENT"
 # host path that is kept per agent: the state dir (~/.claude-pod-<name>) and, in the config dir, the account file
 # (<agent>-<name>.json), the mounted dirs (<agent>-<name>-skills) and the git config (<agent>-<name>.gitconfig).
 # A_KEY is that per-agent name; without a profile it is the agent, so nothing changes. The name ends up in paths and in the
-# uninstaller's glob, so it is restricted to letters, digits, - and _ (starting with a letter or digit), at most 32.
+# uninstaller's glob, so it is restricted to letters, digits, - and _ (starting with a letter or digit), at most 32. The
+# match runs in the C locale: in others (macOS) a range such as A-Z also takes accented letters.
+valid_profile_name() { local LC_ALL=C; case "$1" in ""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1 ;; esac; [ "${#1}" -le 32 ]; }
 A_KEY="$AGENT"
 if [ -n "${AGENT_POD_PROFILE:-}" ]; then
-  case "$AGENT_POD_PROFILE" in
-    *[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) die "AGENT_POD_PROFILE=$AGENT_POD_PROFILE is not a valid name: use letters, digits, - and _, starting with a letter or digit." ;;
-  esac
-  [ "${#AGENT_POD_PROFILE}" -le 32 ] || die "AGENT_POD_PROFILE=$AGENT_POD_PROFILE is longer than 32 characters."
+  valid_profile_name "$AGENT_POD_PROFILE" || die "AGENT_POD_PROFILE=$AGENT_POD_PROFILE is not a valid name: use letters, digits, - and _, starting with a letter or digit, at most 32 characters."
   A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"
 fi
 

@@ -757,9 +757,13 @@ test_profile() {   # AGENT_POD_PROFILE: a second login of an agent, kept apart b
   AGENT=claude launch AGENT_POD_PROFILE=work AGENT_POD_SKILLS_DIR="$C/claude-skills/mine" -- true; rc_is 0
   # the uninstaller takes the state dirs of profiles too, and nothing that only looks like one
   setup_case; mkdir -p "$H/.claude-pod" "$H/.claude-pod-work" "$H/.copilot-pod-W-0_k" "$H/.goose-pod-y" "$H/.claude-pod-_x" "$H/.claude-pod-a b" "$H/.claude-pod-"
+  # as long as the launcher takes (32) is removed, one more is not; a newline at the end of a name or a letter outside A-Z is not a profile
+  mkdir -p "$H/.goose-pod-$(printf 'a%.0s' $(seq 32))" "$H/.goose-pod-$(printf 'a%.0s' $(seq 33))" "$H/.claude-pod-work"$'\n' "$H/.claude-pod-é"
   : > "$H/.copilot-pod-file"; mkdir -p "$H/.claude-podwork" "$H/keep-pod-work"
   RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?; rc_is 0
   [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/.claude-pod-work" ] && [ ! -e "$H/.copilot-pod-W-0_k" ] && [ ! -e "$H/.goose-pod-y" ] || fail "a state dir of a profile was not removed"
+  [ ! -e "$H/.goose-pod-$(printf 'a%.0s' $(seq 32))" ] || fail "a profile name of 32 characters was not removed"
+  [ -d "$H/.goose-pod-$(printf 'a%.0s' $(seq 33))" ] && [ -d "$H/.claude-pod-work"$'\n' ] && [ -d "$H/.claude-pod-é" ] || fail "a name the launcher rejects was removed (33 characters, a trailing newline, or a letter outside A-Z)"
   ! grep -q 'copilot-pod-file' "$CASE/out" || fail "a file named like a state dir was listed for removal"
   [ -d "$H/.claude-pod-_x" ] && [ -d "$H/.claude-pod-a b" ] && [ -d "$H/.claude-pod-" ] && [ -f "$H/.copilot-pod-file" ] && [ -d "$H/.claude-podwork" ] && [ -d "$H/keep-pod-work" ] \
     || fail "the uninstaller removed something that is not the state dir of a profile"
@@ -1152,10 +1156,6 @@ run_mutants() {
   mutate test_profile       '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' '  A_KEY="$AGENT"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' || rc=1
   mutate test_profile       '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR"' || rc=1
   mutate test_profile       'if [ -n "${AGENT_POD_PROFILE:-}" ]; then' 'if false; then' || rc=1
-  mutate test_profile       '    *[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) die' '    [!A-Za-z0-9]*) die' || rc=1
-  mutate test_profile       '    *[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) die' '    *[!A-Za-z0-9_-]*) die' || rc=1
-  mutate test_profile       '  [ "${#AGENT_POD_PROFILE}" -le 32 ] || die' '  [ "${#AGENT_POD_PROFILE}" -le 3200 ] || die' || rc=1
-  mutate test_profile       '  [ "${#AGENT_POD_PROFILE}" -le 32 ] || die' '  [ "${#AGENT_POD_PROFILE}" -le 31 ] || die' || rc=1
   mutate test_profile       'A_CFG_PATH="$A_CFG_HOME/$A_KEY.json"' 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' || rc=1
   mutate test_profile       '  mkdir -p "$A_CFG_HOME/$A_KEY-${_d##*/}"; chmod' '  mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; chmod' || rc=1
   mutate test_profile       '  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$A_KEY-' '  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$AGENT-' || rc=1
@@ -1163,14 +1163,22 @@ run_mutants() {
   mutate test_profile       'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
   mutate test_profile       '_writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-' '_writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-' || rc=1
   mutate test_profile       '  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$A_KEY-' '  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$AGENT-' || rc=1
+  mutate test_profile       '""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1' '""|[!A-Za-z0-9]*) return 1' || rc=1
+  mutate test_profile       '""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1' '""|*[!A-Za-z0-9_-]*) return 1' || rc=1
+  mutate test_profile       '[ "${#1}" -le 32 ]' '[ "${#1}" -le 3200 ]' || rc=1
+  mutate test_profile       '[ "${#1}" -le 32 ]' '[ "${#1}" -le 31 ]' || rc=1
+  mutate test_profile       '""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1' '""|[!A-Za-z0-9]*) return 1' uninstall.sh || rc=1
+  mutate test_profile       '""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1' '""|*[!A-Za-z0-9_-]*) return 1' uninstall.sh || rc=1
+  mutate test_profile       'case "$1" in ""|' 'case "$1" in ' uninstall.sh || rc=1
+  mutate test_profile       '[ "${#1}" -le 32 ]' '[ "${#1}" -le 3200 ]' uninstall.sh || rc=1
+  mutate test_profile       '[ "${#1}" -le 32 ]' '[ "${#1}" -le 31 ]' uninstall.sh || rc=1
+  mutate test_profile       'valid_profile_name "$AGENT_POD_PROFILE" || die' 'true || die' || rc=1
+  mutate test_profile       'valid_profile_name "${_n#*-pod-}" || continue' 'true || continue' uninstall.sh || rc=1
+  mutate test_profile       '_n="${_d##*/}"' '_n="$(basename "$_d")"' uninstall.sh || rc=1
   mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' uninstall.sh || rc=1
   mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.claude-pod-* "$HOME"/.goose-pod-*; do' uninstall.sh || rc=1
   mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-*; do' uninstall.sh || rc=1
   mutate test_profile       '  [ -d "$_d" ] || continue' '  : || continue' uninstall.sh || rc=1
-  mutate test_profile       '*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) continue ;; esac' '[!A-Za-z0-9]*) continue ;; esac' uninstall.sh || rc=1
-  mutate test_profile       '*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) continue ;; esac' '*[!A-Za-z0-9_-]*) continue ;; esac' uninstall.sh || rc=1
-  mutate test_profile       'case "${_n#*-pod-}" in ""|' 'case "${_n#*-pod-}" in ' uninstall.sh || rc=1
-  mutate test_profile       '_n="$(basename "$_d")"; case "${_n#*-pod-}" in' '_n="$_d"; case "${_n#*-pod-}" in' uninstall.sh || rc=1
   mutate test_skills_dir    '${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"}' '' || rc=1
   mutate test_skills_dir    '$(basename "$_k"):ro")' '$(basename "$_k")")' || rc=1
   mutate test_skills_dir    '    _r="$(cd "$_k" && pwd -P)" || continue' '    _r="${_k%/}"' || rc=1
