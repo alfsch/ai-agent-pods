@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# Removes old versions of the published base image (ghcr.io/<owner>/agent-pod-base), used by prune-base-images.yaml.
+#
+# A published tag is several package versions, not one: the index (the tag, a 16-hex hash of Dockerfile.base and
+# pod-environment.md), per architecture an image manifest and an attestation manifest (untagged children of the index)
+# and the cosign signature (a version tagged sha256-<hex of the index digest>.sig). A rule such as "delete the untagged
+# versions" would remove the children of images that are still in use, so whole images are kept or removed:
+#
+#   keep   the KEEP_TAGS newest hash tags (by when the version was pushed) and every hash tag pushed within KEEP_DAYS
+#          days, each with its children (read from the index) and its signature; KEEP_TAGS is at least 1, so the
+#          newest tag stays whatever its age
+#   keep   versions with a tag that is neither a hash nor a signature (somebody pushed them on purpose)
+#   keep   untagged versions younger than GRACE_HOURS: they may be the children of a publish that is still running
+#   delete older hash tags, the signatures of removed images and the untagged versions no kept image refers to
+#
+# It refuses to decide anything when no hash-tagged version is found or when the manifest list of a kept index could not
+# be read: then a child could be taken for an orphan. DRY_RUN is true unless it is exactly "false"; a dry run prints
+# the plan and deletes nothing.
+#
+# Usage: prune-base-images.sh            lists the versions and the children of each index, prints the plan, deletes
+#        prune-base-images.sh decide     the plan from JSON on stdin: {"versions": [<package versions as the API
+#                                        returns them>], "children": {"<index digest>": ["<child digest>", ...]}}
+# Needs gh (GH_TOKEN), jq and docker buildx; GITHUB_REPOSITORY_OWNER names the owner of the package. Bash 3.2 compatible
+# (the stub tests run `decide` on macOS). NOW (epoch seconds) replaces the clock for the tests.
+set -euo pipefail
+
+KEEP_TAGS="${KEEP_TAGS:-5}"
+KEEP_DAYS="${KEEP_DAYS:-30}"
+GRACE_HOURS="${GRACE_HOURS:-24}"
+DRY_RUN="${DRY_RUN:-true}"
+PACKAGE="${PACKAGE:-agent-pod-base}"
+
+for v in KEEP_TAGS KEEP_DAYS GRACE_HOURS; do
+  [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be a number, got '${!v}'" >&2; exit 2; }
+done
+
+# Pure: versions and children in, one line per version out: action, id, digest, reason (tab separated).
+decide() {
+  jq -r --argjson now "${NOW:-$(date +%s)}" --argjson keep_tags "$KEEP_TAGS" --argjson keep_days "$KEEP_DAYS" \
+    --argjson grace_hours "$GRACE_HOURS" '
+    def tags: (.metadata.container.tags // []);
+    def ts: (.created_at | fromdateiso8601);
+    def hashtag: test("^[0-9a-f]{16}$");
+    def sigtag: test("^sha256-[0-9a-f]{64}\\.sig$");
+    def sig_of: "sha256-" + ltrimstr("sha256:") + ".sig";
+    if $keep_tags < 1 then error("KEEP_TAGS must be at least 1") else . end
+    | (.children // {}) as $ch
+    | .versions as $v
+    | [$v[] | select(tags | any(hashtag))] as $hashed
+    | if ($hashed | length) == 0 then error("no hash-tagged version found, refusing to decide anything") else . end
+    | ($now - $keep_days * 86400) as $cutoff
+    | ($now - $grace_hours * 3600) as $grace
+    | ($hashed | sort_by(ts) | reverse | to_entries
+       | map(select(.key < $keep_tags or (.value | ts) >= $cutoff)) | map(.value)) as $kept
+    | ([$kept[] | select($ch[.name] == null) | .name]) as $unknown
+    | if ($unknown | length) > 0 then error("the manifests of a kept index could not be read: " + ($unknown | join(" "))) else . end
+    | ($kept | map(.name)) as $kept_names
+    | ($kept | map(.name | sig_of)) as $kept_sigs
+    | [$v[] | select(tags | any((hashtag or sigtag) | not))] as $others
+    | ([$kept[] | ($ch[.name] // [])[]] + [$others[] | ($ch[.name] // [])[]]) as $protected
+    | $v | sort_by(ts) | reverse | .[]
+    | . as $x | tags as $t
+    | (if ($t | any((hashtag or sigtag) | not)) then ["keep", "tag not set by the publish workflow: " + ($t | join(","))]
+       elif ($t | any(hashtag)) then
+         (if ($kept_names | any(. == $x.name))
+          then ["keep", "one of the newest " + ($keep_tags | tostring) + " tags or pushed within " + ($keep_days | tostring) + " days"]
+          else ["delete", "older tag beyond the limits"] end)
+       elif ($t | any(sigtag)) then
+         (if ($t | any(. as $s | $kept_sigs | any(. == $s)))
+          then ["keep", "signature of a kept image"] else ["delete", "signature of a removed image"] end)
+       elif ($protected | any(. == $x.name)) then ["keep", "part of a kept image"]
+       elif ts >= $grace then ["keep", "younger than the grace period"]
+       else ["delete", "untagged and not part of a kept image"] end)
+    | [.[0], ($x.id | tostring), $x.name, .[1]] | @tsv'
+}
+
+if [ "${1:-}" = decide ]; then decide; exit; fi
+
+OWNER="${GITHUB_REPOSITORY_OWNER:?GITHUB_REPOSITORY_OWNER names the owner of the package}"
+API="/users/$OWNER/packages/container/$PACKAGE"
+IMAGE="ghcr.io/$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')/$PACKAGE"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+
+gh api --paginate "$API/versions?per_page=100" | jq -s 'add // []' > "$tmp/versions.json"
+jq -e 'length > 0' "$tmp/versions.json" >/dev/null || { echo "no package versions found for $IMAGE: refusing to prune" >&2; exit 1; }
+echo "$(jq 'length' "$tmp/versions.json") versions of $IMAGE"
+
+# The children of every index (a hash-tagged version). One that cannot be read is left out; decide refuses when a kept
+# index is the one that is missing.
+echo '{}' > "$tmp/children.json"
+for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | any(test("^[0-9a-f]{16}$"))) | .name' "$tmp/versions.json"); do
+  if kids="$(docker buildx imagetools inspect --raw "$IMAGE@$digest" 2>/dev/null | jq -ce '[.manifests[].digest]' 2>/dev/null)" && [ -n "$kids" ]; then
+    jq -c --arg d "$digest" --argjson k "$kids" '. + {($d): $k}' "$tmp/children.json" > "$tmp/children.next" && mv "$tmp/children.next" "$tmp/children.json"
+  else
+    echo "could not read the manifest list of $digest" >&2
+  fi
+done
+
+jq -n --slurpfile v "$tmp/versions.json" --slurpfile c "$tmp/children.json" '{versions: $v[0], children: $c[0]}' | decide > "$tmp/plan.tsv"
+
+awk -F'\t' '{ printf "%-6s %-12s %s  %s\n", $1, $2, substr($3, 1, 19), $4 }' "$tmp/plan.tsv"
+total="$(wc -l < "$tmp/plan.tsv" | tr -d ' ')"
+doomed="$(awk -F'\t' '$1 == "delete"' "$tmp/plan.tsv" | wc -l | tr -d ' ')"
+echo "$doomed of $total versions to delete, $((total - doomed)) kept"
+
+if [ "$DRY_RUN" != false ]; then echo "dry run: nothing deleted"; exit 0; fi
+
+failed=0
+while IFS=$'\t' read -r action id digest _; do
+  [ "$action" = delete ] || continue
+  if gh api -X DELETE "$API/versions/$id" >/dev/null; then echo "deleted $id"; else echo "could not delete $id ($digest)" >&2; failed=$((failed + 1)); fi
+done < "$tmp/plan.tsv"
+[ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }

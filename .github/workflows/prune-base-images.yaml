@@ -1,0 +1,55 @@
+name: Prune base images
+
+# Removes old versions of ghcr.io/alfsch/agent-pod-base, which publish-base.yaml only ever adds to: whole images are kept
+# or removed (the index, its per-architecture children and its signature), see .github/scripts/prune-base-images.sh for
+# the policy. An old tag disappearing is harmless: install.sh builds the base itself when a pull fails.
+#
+# Manual only for now, and a dry run unless dry_run is switched off: the first run has to show in the log that the
+# workflow's token may list and delete versions of this package and that nothing that belongs to a kept image is on the
+# list. The weekly schedule is added once that has been read.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only print what would be deleted
+        type: boolean
+        default: true
+      keep_tags:
+        description: Keep this many of the newest tags (at least 1)
+        default: "5"
+      keep_days:
+        description: Keep every tag pushed within this many days
+        default: "30"
+
+permissions:
+  contents: read
+
+# A prune must not run against a publish in flight, and a running one is finished, not cancelled.
+concurrency:
+  group: publish-base
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          KEEP_TAGS: ${{ inputs.keep_tags }}
+          KEEP_DAYS: ${{ inputs.keep_days }}
+        run: .github/scripts/prune-base-images.sh
