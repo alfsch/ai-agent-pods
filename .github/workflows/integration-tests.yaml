@@ -40,6 +40,34 @@ jobs:
       - name: Build the image
         run: ./install.sh
 
+      # The pull request build above falls back to building the base, so it passes with a broken cosign invocation (a
+      # bumped cosign image, a changed flag). This step needs the verification to succeed on a published base: the one of
+      # this commit if it is published, else the one main is at (a change to Dockerfile.base is published only after the merge).
+      - name: The published base is verified by the cosign container
+        run: |
+          tag="$(./install.sh --base-hash)"
+          if ! docker manifest inspect "ghcr.io/alfsch/agent-pod-base:$tag" >/dev/null 2>&1; then
+            git fetch --depth=1 origin main
+            mkdir "$RUNNER_TEMP/main"
+            for f in install.sh Dockerfile.base pod-environment.md; do git show "origin/main:$f" > "$RUNNER_TEMP/main/$f"; done
+            chmod +x "$RUNNER_TEMP/main/install.sh"
+            tag="$("$RUNNER_TEMP/main/install.sh" --base-hash)"
+          fi
+          echo "BASE_TAG=$tag" >> "$GITHUB_ENV"
+          echo "Published base tag: $tag"
+          ./install.sh --verify-base "$tag" | tee verify.log
+          grep -q 'signature verified' verify.log
+      # The same check with a signer identity the published base does not have must fail because of the signature, or the
+      # step above proves nothing.
+      - name: A wrong signer identity is rejected
+        run: |
+          sed 's/publish-base\\\.yaml/no-such-workflow\\.yaml/' install.sh > install-wrong-signer.sh
+          grep -q 'no-such-workflow' install-wrong-signer.sh
+          chmod +x install-wrong-signer.sh
+          if ./install-wrong-signer.sh --verify-base "$BASE_TAG" > wrong.log 2>&1; then cat wrong.log; echo 'a wrong signer identity was accepted'; exit 1; fi
+          cat wrong.log
+          grep -q 'Signature check failed' wrong.log
+
       - name: Integration tests
         run: tests/integration.sh
 

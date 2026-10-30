@@ -48,8 +48,8 @@ AGENT="${AGENT-claude}"
 #   STUB_INDEX_JSON=x     what `buildx imagetools create --dry-run` prints (the index to be pushed); STUB_INSPECT_FAIL=1 makes
 #                         `imagetools inspect <ref>@sha256:...` fail; looking a tag up gives a digest that is not the created one
 #   STUB_REPO_DIGEST=x    what the pulled image's RepoDigests hold (empty by default); STUB_COSIGN_FAIL=1 `cosign verify` fails
-#                         like a signature that does not match; STUB_COSIGN_NET=1 it cannot reach Sigstore; STUB_COSIGN_RUN_FAIL=1
-#                         Docker cannot run the cosign image (no pull)
+#                         like a signature that does not match; STUB_COSIGN_NET=1 it cannot reach Sigstore; STUB_COSIGN_BUNDLE=1
+#                         it rejects a malformed bundle whose field it echoes; STUB_COSIGN_RUN_FAIL=N `docker run` of the image exits N (125-127)
 cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_LOG"
@@ -101,8 +101,9 @@ case "$1" in
   run)
     # the cosign container: the verification of the published base
     if [[ "$*" == *sigstore/cosign/cosign* ]]; then
-      [ -z "${STUB_COSIGN_RUN_FAIL:-}" ] || { echo 'docker: Error response from daemon: Get "https://ghcr.io/v2/": net/http: request canceled' >&2; exit 125; }
+      [ -z "${STUB_COSIGN_RUN_FAIL:-}" ] || { echo 'docker: Error response from daemon: Get "https://ghcr.io/v2/": net/http: request canceled' >&2; exit "$STUB_COSIGN_RUN_FAIL"; }
       [ -z "${STUB_COSIGN_NET:-}" ] || { echo 'Error: getting trust root: dial tcp: lookup tuf-repo-cdn.sigstore.dev: no such host' >&2; exit 1; }
+      [ -z "${STUB_COSIGN_BUNDLE:-}" ] || { echo 'Error: invalid kind value: "dial tcp"' >&2; exit 1; }
       [ -z "${STUB_COSIGN_FAIL:-}" ] || { echo 'Error: no matching signatures: none of the expected identities matched' >&2; exit 1; }
       exit 0
     fi
@@ -1001,19 +1002,41 @@ test_base_signature() {   # a pulled base is verified with the cosign container;
   # a signature that does not match: the pulled image is not used, the base is built here, also when signatures are required
   sig STUB_COSIGN_FAIL=1; rc_is 0; in_out 'Signature check failed'; in_out 'building it here'; logged "^build .*-f .*Dockerfile.base -t $DEF:$H0 "
   sig STUB_COSIGN_FAIL=1 AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; in_out 'Signature check failed'; logged '^build .*-f .*Dockerfile.base'
-  # cosign cannot run (no pull of its image; no way to Sigstore): the base is used, unverified, and it says so; with
+  # Docker cannot run cosign (no pull of its image): the base is used, unverified, and it says so; with
   # AGENT_POD_REQUIRE_SIGNED_BASE=1 it is not used
-  sig STUB_COSIGN_RUN_FAIL=1; rc_is 0; in_out 'cosign could not run'; not_in_out 'Signature check failed'; not_logged '-f .*Dockerfile.base'
-  logged "^build .*--build-arg BASE_IMAGE=$DEF:$H0 "
-  sig STUB_COSIGN_NET=1; rc_is 0; in_out 'cosign could not run'; not_in_out 'Signature check failed'; not_logged '-f .*Dockerfile.base'
-  sig STUB_COSIGN_RUN_FAIL=1 AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; in_out 'Not using the pulled image'; logged '^build .*-f .*Dockerfile.base'
-  sig STUB_COSIGN_NET=1 AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; in_out 'Not using the pulled image'; logged '^build .*-f .*Dockerfile.base'
+  local n
+  for n in 125 126 127; do
+    sig STUB_COSIGN_RUN_FAIL=$n; rc_is 0; in_out 'cosign could not run'; not_in_out 'Signature check failed'; not_logged '-f .*Dockerfile.base'
+    logged "^build .*--build-arg BASE_IMAGE=$DEF:$H0 "
+  done
+  sig STUB_COSIGN_RUN_FAIL=125 AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; in_out 'Not using the pulled image'; logged '^build .*-f .*Dockerfile.base'
+  # cosign itself failing is never "could not run", whatever it prints: a Sigstore that cannot be reached, and a malformed
+  # bundle whose error repeats a field of it (text such as "dial tcp" that an attacker could put there) are failed checks
+  sig STUB_COSIGN_NET=1; rc_is 0; in_out 'Signature check failed'; not_in_out 'cosign could not run'; logged '^build .*-f .*Dockerfile.base'
+  sig STUB_COSIGN_BUNDLE=1; rc_is 0; in_out 'Signature check failed'; not_in_out 'cosign could not run'; logged '^build .*-f .*Dockerfile.base'
   # another repository (a fork): not checked, used unless signatures are required
   sig AGENT_POD_BASE_REPO=test.invalid/base; rc_is 0; in_out 'not the default repository'; not_logged "$RUN"; not_logged '-f .*Dockerfile.base'
   sig AGENT_POD_BASE_REPO=test.invalid/base AGENT_POD_REQUIRE_SIGNED_BASE=1; rc_is 0; logged '^build .*-f .*Dockerfile.base'
   # a base that is built here (AGENT_POD_BUILD_BASE=1) or kept after a failed pull is not pulled, so not verified
   sig AGENT_POD_BUILD_BASE=1; rc_is 0; not_logged "$RUN"
   sig STUB_PULL_FAIL=1; rc_is 0; not_logged "$RUN"
+}
+
+test_verify_base_mode() {   # install.sh --verify-base <tag>: only the check, and a check that could not run fails too
+  local d H0 DEF=ghcr.io/alfsch/agent-pod-base
+  vb() {   # vb [args] [VAR=value]... : the mode (it is given the tag unless the first argument is --)
+    setup_case; d="$CASE/repo"; mkdir -p "$d"; cp "$INSTALLER" "$d/install.sh"
+    printf 'ARG BASE_IMAGE\nFROM ${BASE_IMAGE}\n' > "$d/Dockerfile"; printf 'FROM node:9-slim\n' > "$d/Dockerfile.base"; printf 'a\n' > "$d/pod-environment.md"
+    local args=(--verify-base tag1); [ "${1:-}" != -- ] || { args=(--verify-base); shift; }
+    RC=0; (cd "$d" && env HOME="$H" PATH="$BIN:$PATH" "$@" ./install.sh ${args[@]+"${args[@]}"} </dev/null >"$CASE/out" 2>"$CASE/err") || RC=$?
+  }
+  vb; rc_is 0; in_out 'signature verified'; logged "^pull $DEF:tag1\$"; logged "^run .*sigstore/cosign/cosign.* verify .* $DEF:tag1\$"
+  not_logged '^build'   # nothing is built, no agent image either
+  vb STUB_COSIGN_FAIL=1; rc_is 1; in_out 'Signature check failed'; not_logged '^build'
+  # a check that could not run is not a pass here, however the normal install treats it
+  vb STUB_COSIGN_RUN_FAIL=125; rc_is 1; in_out 'cosign could not run'; not_logged '^build'
+  vb STUB_PULL_FAIL=1; rc_is 1; in_out 'Could not pull'; not_logged '^run .*cosign'
+  vb --; rc_is 1; in_out 'needs the tag'; not_logged '^pull'
 }
 
 test_agent_install_layer() {   # the install layer of Dockerfile runs the agent and reinstalls when it does not start
@@ -1281,10 +1304,18 @@ run_mutants() {
   mutate test_base_signature '    [ -z "$ref" ] || BASE_IMAGE="$ref"' '    :' install.sh || rc=1
   mutate test_base_signature "index(\$0, repo) == 1 { print; exit }" "{ print; exit }" install.sh || rc=1
   mutate test_base_signature '      [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return ;;' '      return 0 ;;' install.sh || rc=1
-  mutate test_base_signature '    125:*|126:*|127:*|' '    ' install.sh || rc=1
-  mutate test_base_signature "|*'dial tcp'*|*'no such host'*|*'i/o timeout'*|*'connection refused'*|*'TLS handshake'*|*'context deadline exceeded'*)" ')' install.sh || rc=1
-  mutate test_base_signature "125:*|126:*|127:*|*'dial tcp'*|" "*|" install.sh || rc=1
-  mutate test_base_signature 'ghcr.io/sigstore/cosign/cosign:v3.0.4@sha256:' 'ghcr.io/sigstore/cosign/cosign:v3.0.4#sha256:' install.sh || rc=1
+  mutate test_base_signature '    125|126|127)' '    125|126|127|1)' install.sh || rc=1
+  mutate test_base_signature '    125|126|127)' '    125|126)' install.sh || rc=1
+  mutate test_base_signature '    125|126|127)' '    125|127)' install.sh || rc=1
+  mutate test_base_signature 'cosign/cosign:' 'cosign/cosign#' install.sh || rc=1
+  mutate test_verify_base_mode '  BASE_IMAGE="$BASE_REPO:$2"; AGENT_POD_REQUIRE_SIGNED_BASE=1' '  BASE_IMAGE="$BASE_REPO:$2"' install.sh || rc=1
+  mutate test_verify_base_mode '  verify_base || exit 1
+  exit 0' '  verify_base || true
+  exit 0' install.sh || rc=1
+  mutate test_verify_base_mode '  [ -n "${2:-}" ] || die "--verify-base needs the tag of the base image."' '  :' install.sh || rc=1
+  mutate test_verify_base_mode '  docker pull "$BASE_IMAGE" >/dev/null || die "Could not pull $BASE_IMAGE."' '  :' install.sh || rc=1
+  mutate test_verify_base_mode '  --verify-base)        AGENTS=() ;;
+' '' install.sh || rc=1
   mutate test_base_signature 'docker run --rm --read-only --tmpfs /tmp -e HOME=/tmp "$COSIGN_IMAGE" verify' 'docker run --rm --read-only --tmpfs /tmp -e HOME=/tmp "$COSIGN_IMAGE" version; true' install.sh || rc=1
   mutate test_base_signature '    printf '"'"'%s  Not verified: %s is not the default repository.%s\n'"'"' "$DIM" "$BASE_REPO" "$RESET"
     [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return' '    return 0' install.sh || rc=1

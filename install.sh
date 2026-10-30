@@ -12,6 +12,7 @@ die()  { err "$*"; trap - ERR; exit 1; }
 trap 'err "install.sh failed at line $LINENO"' ERR
 
 # Usage: install.sh [claude|copilot|goose|all]   (default: all)
+#        install.sh --verify-base <tag>   only checks the signature of the published base with that tag (see verify_base)
 # Pin a version with CLAUDE_CODE_VERSION=x.y.z, COPILOT_CLI_VERSION=x.y.z or GOOSE_VERSION=x.y.z (for the agent named on the command
 # line). The launcher calls this by itself when the image of an agent is missing or outdated.
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +33,7 @@ WHICH="${1:-all}"
 case "$WHICH" in
   claude|copilot|goose) AGENTS=("$WHICH") ;;
   all)                  AGENTS=(claude copilot goose) ;;
+  --verify-base)        AGENTS=() ;;
   *)                    die "Unknown agent '$WHICH'. Use claude, copilot, goose or all." ;;
 esac
 
@@ -50,7 +52,7 @@ BASE_IMAGE="$BASE_REPO:$(base_hash)"
 # come from that workflow on main of this repository, so an image pushed by hand or by another workflow is not used (the base
 # is built here instead). cosign runs as a container pinned by digest (Renovate keeps it current), so Docker is all it
 # takes. Only the default repository is checked: a fork's signer is not this one. If cosign cannot run (the image cannot be
-# pulled, Sigstore is not reachable) the base is used with a warning; AGENT_POD_REQUIRE_SIGNED_BASE=1 refuses it then.
+# pulled, no daemon) the base is used with a warning; AGENT_POD_REQUIRE_SIGNED_BASE=1 refuses it then.
 # If you rename the workflow, change this.
 SIGNER_ISSUER=https://token.actions.githubusercontent.com
 SIGNER_IDENTITY='^https://github.com/alfsch/ai-agent-pods/\.github/workflows/publish-base\.yaml@refs/heads/main$'
@@ -105,10 +107,11 @@ verify_base() {
   else
     rc=$?
   fi
-  # No verdict: Docker could not run the image (125-127: no pull, no daemon) or cosign could not reach Sigstore. Anything
-  # else is cosign saying the signature does not match, which must not pass.
-  case "$rc:$out" in
-    125:*|126:*|127:*|*'dial tcp'*|*'no such host'*|*'i/o timeout'*|*'connection refused'*|*'TLS handshake'*|*'context deadline exceeded'*)
+  # No verdict only when Docker itself could not run the image (125-127: no pull, no daemon). What cosign prints is not
+  # looked at: it can echo fields of the image's signature bundle, so a text like "dial tcp" in it is no proof of an outage.
+  # Every failure of cosign, a Sigstore that cannot be reached included, therefore counts as a failed check.
+  case "$rc" in
+    125|126|127)
       printf '%s  Not verified: cosign could not run (%s).%s\n' "$DIM" "$(printf '%s' "$out" | tail -n1)" "$RESET"
       [ -z "${AGENT_POD_REQUIRE_SIGNED_BASE:-}" ]; return ;;
   esac
@@ -134,6 +137,17 @@ ensure_base() {
     build_base
   fi
 }
+# --verify-base <tag>: nothing is built; the published base with that tag is pulled and checked, strictly: a check that
+# could not run fails too. CI uses it to see that the cosign invocation still works (a pull request that breaks it would
+# otherwise only fall back to building the base).
+if [ "$WHICH" = --verify-base ]; then
+  [ -n "${2:-}" ] || die "--verify-base needs the tag of the base image."
+  BASE_IMAGE="$BASE_REPO:$2"; AGENT_POD_REQUIRE_SIGNED_BASE=1
+  info "Pulling the base image '$BASE_IMAGE'"
+  docker pull "$BASE_IMAGE" >/dev/null || die "Could not pull $BASE_IMAGE."
+  verify_base || exit 1
+  exit 0
+fi
 ensure_base
 
 # Builds agent-pod:<agent>. The agent-specific values are the same ones as in the launcher's table.
