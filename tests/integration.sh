@@ -6,7 +6,8 @@
 #
 # Needs: Docker, the images `agent-pod:claude`, `agent-pod:copilot` and `agent-pod:goose` (./install.sh builds them) and, for the rootless sidecar, unprivileged
 # user namespaces (on Ubuntu 24.04+: kernel.apparmor_restrict_unprivileged_userns=0). Network access to pull the
-# inner test image (ITEST_INNER_IMAGES, tried in order). Only exit codes and results are asserted, never timings.
+# inner test image (ITEST_INNER_IMAGES, tried in order). Only exit codes and results are asserted, never timings; the time
+# of each section and of the image pulls is printed for the CI log (tests/integration.sh is where the run time goes).
 # With a rootless default daemon the launcher runs DOCKER=1 sessions on the rootful daemon at /var/run/docker.sock; the
 # script finds it itself (tests/integration.sh --show-daemons prints what it found), checks sidecars, caches and leaks
 # there and keeps the pod image and plain sessions on the default daemon. It needs access to that socket and the
@@ -29,7 +30,10 @@ ok()   { PASS=$((PASS + 1)); echo "ok   $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "FAIL $1"; }
 check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else fail "$d"; fi; }
 check_not() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then fail "$d"; else ok "$d"; fi; }
-section() { echo; echo "== $1"; }
+# Each section's duration is collected and printed at the end; it is information, nothing checks it.
+SEC_NAME=; SEC_T=$SECONDS; SEC_TIMES=
+section_end() { if [ -n "$SEC_NAME" ]; then SEC_TIMES+="$(printf '%5s s  %s' "$((SECONDS - SEC_T))" "$SEC_NAME")"$'\n'; fi; }
+section() { section_end; SEC_NAME="$1"; SEC_T=$SECONDS; echo; echo "== $1"; }
 indent() { sed 's/^/    | /'; }
 
 command -v docker >/dev/null || { echo "docker is required" >&2; exit 2; }
@@ -161,7 +165,9 @@ section "pinned sidecar image: the contract the launcher relies on"
 PIN="$(grep -o 'docker:[0-9a-z.-]*-dind-rootless@sha256:[0-9a-f]\{64\}' "$LAUNCHER" | head -n1)"
 check "launcher pins a rootless dind image by digest" test -n "$PIN"
 if [ -n "$PIN" ]; then
+  _t0=$SECONDS
   check "pull $PIN" bash -c 'for i in 1 2 3; do docker pull -q "$0" && exit 0; sleep 5; done; exit 1' "$PIN"
+  echo "     (pull of the sidecar image took $((SECONDS - _t0)) s)"
   contract() { docker run --rm --entrypoint sh "$PIN" -c "$1"; }
   check "user rootless is 1000:1000 (the derived image renumbers exactly this)" contract "grep -q '^rootless:x:1000:1000:' /etc/passwd"
   check "group rootless is 1000" contract "grep -q '^rootless:x:1000:' /etc/group"
@@ -176,7 +182,7 @@ section "session: DOCKER=1 (rootless sidecar, mTLS, inner containers, project wr
 POD_SCRIPT='
 step() { local n="$1" out rc; shift; out="$("$@" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then echo "STEP ok $n"; else echo "STEP FAIL $n"; printf "%s\n" "$out" | tail -n 12 | sed "s/^/    | /"; fi; }
-pick() { local r i; for r in "$@"; do for i in 1 2 3; do docker pull -q "$r" >/dev/null 2>&1 && { IMG="$r"; return 0; }; sleep 3; done; done; return 1; }
+pick() { local r i t=$SECONDS; for r in "$@"; do for i in 1 2 3; do docker pull -q "$r" >/dev/null 2>&1 && { IMG="$r"; echo "TIMING pull of $r in the sidecar took $((SECONDS - t)) s"; return 0; }; sleep 3; done; done; return 1; }
 info() { docker info >/dev/null 2>&1 && docker info -f "{{.SecurityOptions}}" | grep -q "name=rootless" && [ -n "$(docker info -f "{{.ServerVersion}}")" ]; }
 tls_env() { [ "$DOCKER_TLS_VERIFY" = 1 ] && [ "$DOCKER_HOST" = tcp://dind:2376 ]; }
 step docker-info-reports-rootless info
@@ -207,6 +213,7 @@ while IFS= read -r line; do
 done <"$SESSION_OUT"
 [ "$(grep -c '^STEP ' "$SESSION_OUT")" -ge 8 ] || { fail "session ran all its steps"; session_failed=1; }
 [ -z "$session_failed" ] || { echo "  session output:"; tail -n 60 "$SESSION_OUT" | indent; }
+grep '^TIMING ' "$SESSION_OUT" | sed 's/^TIMING /     (/; s/$/)/'
 
 section "exit code of the pod is the exit code of the launcher"
 run_launcher DOCKER=1 -- sh -c 'exit 7' >"$WORK/exit.out" 2>&1; rc=$?
@@ -305,5 +312,7 @@ if [ -z "$SNAP_OK" ]; then fail "cleanup could not be verified: listing the Dock
 elif [ -z "$LEAKS" ]; then ok "the tests left no container, network or certificate volume behind"
 else fail "the tests left resources behind"; printf '%s\n' "$LEAKS" | indent; fi
 
+section_end
+echo; echo "time per section (not asserted):"; printf '%s' "$SEC_TIMES" | indent
 echo; echo "$PASS passed, $FAIL failed"
 [ "$FAIL" = 0 ]
