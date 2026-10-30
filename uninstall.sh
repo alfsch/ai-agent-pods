@@ -14,6 +14,12 @@ trap 'err "uninstall.sh failed at line $LINENO"' ERR
 # The state dirs keep the names of the single-agent tools, so existing logins carry over.
 # The config files (login binding, trust state) are in the config dir.
 STATE_DIRS=("$HOME/.claude-pod" "$HOME/.copilot-pod" "$HOME/.goose-pod" "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod")
+# The state dirs of profiles (AGENT_POD_PROFILE) are the same names with -<profile>; only names the launcher accepts are taken.
+for _d in "$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do
+  [ -d "$_d" ] || continue
+  _n="$(basename "$_d")"; case "${_n#*-pod-}" in ""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) continue ;; esac
+  STATE_DIRS+=("$_d")
+done
 IMAGES=(agent-pod:claude agent-pod:copilot agent-pod:goose)
 BASE_REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"   # the shared base image install.sh pulls or builds
 

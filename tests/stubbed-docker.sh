@@ -713,6 +713,61 @@ test_skills_dir() {   # AGENT_POD_SKILLS_DIR: one read-only mount per skill of a
   logged " -v $S/audit:/home/agent-pod/.agents/skills/audit:ro "; logged " -v $H/config/agent-pod/goose-skills:/home/agent-pod/.agents/skills "
   not_logged '\.claude/skills/'
 }
+test_profile() {   # AGENT_POD_PROFILE: a second login of an agent, kept apart by a name added to every per-agent host path
+  local a v C
+  pf() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; }
+  # claude and copilot: the state dir and the account file carry the name, the mounted skills dir too; the defaults are not touched
+  for a in claude copilot; do
+    pf; AGENT=$a launch AGENT_POD_PROFILE=work -- true; rc_is 0
+    logged " -v $H/.$a-pod-work:/home/agent-pod/.$a "; logged " -v $H/config/agent-pod/$a-work.json:/home/agent-pod/.$a.json "
+    logged " -v $H/config/agent-pod/$a-work-skills:/home/agent-pod/.agents/skills "
+    not_logged " -v $H/\.$a-pod:"; not_logged "agent-pod/$a\.json:"; not_logged "$a-skills:"
+    [ -d "$H/.$a-pod-work" ] && [ -s "$H/config/agent-pod/$a-work.json" ] && [ -d "$H/config/agent-pod/$a-work-skills" ] || fail "$a: the profile dirs were not made"
+    [ ! -e "$H/.$a-pod" ] && [ ! -e "$H/config/agent-pod/$a.json" ] && [ ! -e "$H/config/agent-pod/$a-skills" ] || fail "$a: the default dirs were made for a profile"
+  done
+  # goose keeps its config in the state dir, and has three mounted dirs
+  pf; AGENT=goose launch AGENT_POD_PROFILE=work -- true; rc_is 0
+  logged " -v $H/.goose-pod-work:/home/agent-pod/.goose "
+  for v in skills:.agents/skills plugins:.agents/plugins agents:.agents/agents; do logged " -v $H/config/agent-pod/goose-work-${v%%:*}:/home/agent-pod/${v#*:} "; done
+  not_logged " -v $H/\.goose-pod:"; not_logged 'goose-skills'; [ ! -e "$H/.goose-pod" ] || fail "goose: the default state dir was made for a profile"
+  # two profiles of one agent share nothing, and neither shares with the default login
+  pf; AGENT=claude launch AGENT_POD_PROFILE=private -- true; rc_is 0; logged " -v $H/.claude-pod-private:/home/agent-pod/.claude "; not_logged 'claude-pod-work'
+  AGENT=claude launch -- true; rc_is 0; logged " -v $H/.claude-pod:/home/agent-pod/.claude "; logged " -v $H/config/agent-pod/claude.json:"
+  # an empty name is no profile
+  pf; AGENT=claude launch AGENT_POD_PROFILE= -- true; rc_is 0; logged " -v $H/.claude-pod:/home/agent-pod/.claude "; not_logged 'claude-pod-'
+  # names that would leave the dir, hide a file, or need quoting are refused before anything starts; the longest valid one is not
+  for v in 'a/b' '../x' '-x' '_x' '.h' 'a b' 'a*' 'é' "$(printf 'a%.0s' $(seq 33))"; do
+    pf; AGENT=claude launch AGENT_POD_PROFILE="$v" -- true; [ "$RC" != 0 ] || fail "the profile name '$v' was accepted"
+    in_out 'AGENT_POD_PROFILE='; not_logged '^run '; [ ! -e "$H/.claude-pod" ] || fail "the default state dir was made for the bad name '$v'"
+  done
+  for v in W-0_k "$(printf 'a%.0s' $(seq 32))" 0; do pf; AGENT=claude launch AGENT_POD_PROFILE="$v" -- true; rc_is 0; logged " -v $H/.claude-pod-$v:/home/agent-pod/.claude "; done
+  # the git identity: the profile's file wins over the agent's and the shared one, which are the fallbacks; another profile's is not used
+  pf; echo a > "$C/gitconfig"; echo b > "$C/claude.gitconfig"; echo c > "$C/claude-work.gitconfig"; echo d > "$C/claude-other.gitconfig"
+  AGENT=claude launch AGENT_POD_PROFILE=work -- true; rc_is 0; logged " -v $C/claude-work.gitconfig:/home/agent-pod/.gitconfig:ro "; not_logged 'claude-other'
+  pf; echo a > "$C/gitconfig"; echo b > "$C/claude.gitconfig"; echo d > "$C/claude-other.gitconfig"
+  AGENT=claude launch AGENT_POD_PROFILE=work -- true; rc_is 0; logged " -v $C/claude.gitconfig:/home/agent-pod/.gitconfig:ro "
+  pf; echo a > "$C/gitconfig"; echo c > "$C/claude-work.gitconfig"
+  AGENT=claude launch -- true; rc_is 0; logged " -v $C/gitconfig:/home/agent-pod/.gitconfig:ro "; not_logged 'claude-work'
+  # what the pod can write follows the profile: a git config or a skill in the dir mounted for it is refused, in the default dir it is not
+  pf; mkdir -p "$C/claude-work-skills" "$C/claude-skills"; echo w > "$C/claude-work-skills/gc"; echo w > "$C/claude-skills/gc"
+  AGENT=claude launch AGENT_POD_PROFILE=work AGENT_POD_GITCONFIG="$C/claude-work-skills/gc" -- true; [ "$RC" != 0 ] || fail "a git config in the profile's mounted dir was accepted"
+  AGENT=claude launch AGENT_POD_PROFILE=work AGENT_POD_GITCONFIG="$C/claude-skills/gc" -- true; rc_is 0
+  pf; mkdir -p "$C/claude-work-skills/mine/audit" "$C/claude-skills/mine/audit"; echo a > "$C/claude-work-skills/mine/audit/SKILL.md"; echo a > "$C/claude-skills/mine/audit/SKILL.md"
+  AGENT=claude launch AGENT_POD_PROFILE=work AGENT_POD_SKILLS_DIR="$C/claude-work-skills/mine" -- true; [ "$RC" != 0 ] || fail "skills in the profile's mounted dir were accepted"
+  AGENT=claude launch AGENT_POD_PROFILE=work AGENT_POD_SKILLS_DIR="$C/claude-skills/mine" -- true; rc_is 0
+  # the uninstaller takes the state dirs of profiles too, and nothing that only looks like one
+  setup_case; mkdir -p "$H/.claude-pod" "$H/.claude-pod-work" "$H/.copilot-pod-W-0_k" "$H/.goose-pod-y" "$H/.claude-pod-_x" "$H/.claude-pod-a b" "$H/.claude-pod-"
+  : > "$H/.copilot-pod-file"; mkdir -p "$H/.claude-podwork" "$H/keep-pod-work"
+  RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?; rc_is 0
+  [ ! -e "$H/.claude-pod" ] && [ ! -e "$H/.claude-pod-work" ] && [ ! -e "$H/.copilot-pod-W-0_k" ] && [ ! -e "$H/.goose-pod-y" ] || fail "a state dir of a profile was not removed"
+  ! grep -q 'copilot-pod-file' "$CASE/out" || fail "a file named like a state dir was listed for removal"
+  [ -d "$H/.claude-pod-_x" ] && [ -d "$H/.claude-pod-a b" ] && [ -d "$H/.claude-pod-" ] && [ -f "$H/.copilot-pod-file" ] && [ -d "$H/.claude-podwork" ] && [ -d "$H/keep-pod-work" ] \
+    || fail "the uninstaller removed something that is not the state dir of a profile"
+  # a home dir whose own path has -pod- in it: only the name of the dir is judged
+  setup_case; H="$CASE/my-pod-home"; mkdir -p "$H/.claude-pod-work"
+  RC=0; launch_env env STUB_ROOTFUL_SOCK=1 "$UNINSTALLER" <<<y >"$CASE/out" 2>"$CASE/err" || RC=$?; rc_is 0
+  [ ! -e "$H/.claude-pod-work" ] || fail "a profile state dir was not removed from a home dir with -pod- in its path"
+}
 test_cache_shared_between_agents() {   # one Docker cache per project, whichever agent runs in it
   local a
   for a in claude copilot goose; do
@@ -1094,6 +1149,28 @@ run_mutants() {
   mutate test_agent_flags   'A_FORWARD="GOOSE_PROVIDER ' 'A_FORWARD="' || rc=1
   mutate test_agent_flags   '${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"}' '-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"' || rc=1
   mutate test_agent_flags   '${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"}' '' || rc=1
+  mutate test_profile       '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' '  A_KEY="$AGENT"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' || rc=1
+  mutate test_profile       '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"' '  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR"' || rc=1
+  mutate test_profile       'if [ -n "${AGENT_POD_PROFILE:-}" ]; then' 'if false; then' || rc=1
+  mutate test_profile       '    *[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) die' '    [!A-Za-z0-9]*) die' || rc=1
+  mutate test_profile       '    *[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) die' '    *[!A-Za-z0-9_-]*) die' || rc=1
+  mutate test_profile       '  [ "${#AGENT_POD_PROFILE}" -le 32 ] || die' '  [ "${#AGENT_POD_PROFILE}" -le 3200 ] || die' || rc=1
+  mutate test_profile       '  [ "${#AGENT_POD_PROFILE}" -le 32 ] || die' '  [ "${#AGENT_POD_PROFILE}" -le 31 ] || die' || rc=1
+  mutate test_profile       'A_CFG_PATH="$A_CFG_HOME/$A_KEY.json"' 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' || rc=1
+  mutate test_profile       '  mkdir -p "$A_CFG_HOME/$A_KEY-${_d##*/}"; chmod' '  mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; chmod' || rc=1
+  mutate test_profile       '  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$A_KEY-' '  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$AGENT-' || rc=1
+  mutate test_profile       'elif [ -f "$A_CFG_HOME/$A_KEY.gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_profile       'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
+  mutate test_profile       '_writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-' '_writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-' || rc=1
+  mutate test_profile       '  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$A_KEY-' '  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$AGENT-' || rc=1
+  mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' uninstall.sh || rc=1
+  mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.claude-pod-* "$HOME"/.goose-pod-*; do' uninstall.sh || rc=1
+  mutate test_profile       '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-* "$HOME"/.goose-pod-*; do' '"$HOME"/.claude-pod-* "$HOME"/.copilot-pod-*; do' uninstall.sh || rc=1
+  mutate test_profile       '  [ -d "$_d" ] || continue' '  : || continue' uninstall.sh || rc=1
+  mutate test_profile       '*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) continue ;; esac' '[!A-Za-z0-9]*) continue ;; esac' uninstall.sh || rc=1
+  mutate test_profile       '*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) continue ;; esac' '*[!A-Za-z0-9_-]*) continue ;; esac' uninstall.sh || rc=1
+  mutate test_profile       'case "${_n#*-pod-}" in ""|' 'case "${_n#*-pod-}" in ' uninstall.sh || rc=1
+  mutate test_profile       '_n="$(basename "$_d")"; case "${_n#*-pod-}" in' '_n="$_d"; case "${_n#*-pod-}" in' uninstall.sh || rc=1
   mutate test_skills_dir    '${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"}' '' || rc=1
   mutate test_skills_dir    '$(basename "$_k"):ro")' '$(basename "$_k")")' || rc=1
   mutate test_skills_dir    '    _r="$(cd "$_k" && pwd -P)" || continue' '    _r="${_k%/}"' || rc=1
@@ -1123,12 +1200,12 @@ run_mutants() {
   mutate test_git_identity  'for _d in $A_EXTRA_DIRS; do _writable+=' 'for _d in; do _writable+=' || rc=1
   mutate test_git_identity  'case "$_gd/" in "$_w"/*)' 'case "$_gd/" in "$_w")' || rc=1
   mutate test_git_identity  '/home/agent-pod/.gitconfig:ro' '/home/agent-pod/.gitconfig' || rc=1
-  mutate test_git_identity  'elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then' 'elif false; then' || rc=1
   mutate test_git_identity  'elif [ -f "$A_CFG_HOME/gitconfig" ]; then' 'elif false; then' || rc=1
-  mutate test_git_identity  '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"' '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"' || rc=1
+  mutate test_profile       '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"' '"$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"' || rc=1
+  mutate test_profile       '"$A_CFG_HOME/$A_KEY.gitconfig" ]; then _g="$A_CFG_HOME/$A_KEY.gitconfig"' '"$A_CFG_HOME/$A_KEY.gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"' || rc=1
   mutate test_git_identity  '  [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."' '  :' || rc=1
   mutate test_git_identity  'if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then' 'if false; then' || rc=1
-  mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; ' '' || rc=1
+  mutate test_agent_flags   'mkdir -p "$A_CFG_HOME/$A_KEY-${_d##*/}"; ' '' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.claude.json; A_EXTRA_DIRS=' || rc=1
   mutate test_agent_flags   'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=.agents/skills' 'A_CFG_FILE=.copilot.json; A_EXTRA_DIRS=' || rc=1
   mutate test_agent_flags   'A_EXTRA_DIRS=".agents/skills .agents/plugins .agents/agents"' 'A_EXTRA_DIRS=".agents/skills .agents/plugins"' || rc=1
@@ -1140,7 +1217,7 @@ run_mutants() {
   printf' 'if true; then
   printf' || rc=1
   mutate test_stdin_attached 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm")' || rc=1
-  mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$AGENT.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
+  mutate test_config_file_outside_state_dir 'A_CFG_PATH="$A_CFG_HOME/$A_KEY.json"' 'A_CFG_PATH="$A_STATE_DIR/$A_CFG_FILE"' || rc=1
   mutate test_config_file_outside_state_dir '[ -s "$A_CFG_PATH" ] || printf' 'printf' || rc=1
   mutate test_update_check  '"$_newest" != "$_installed"' 'false' || rc=1
   mutate test_update_check  $'if [ "$A_SRC" = github ]; then\n      # the redirect' $'if false; then\n      # the redirect' || rc=1
