@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
-# Prints the tag of the newest published base image (ghcr.io/alfsch/agent-pod-base, or $AGENT_POD_BASE_REPO) that exists
-# in the registry: the one of the checked-out tree if it is published, else the one of the newest commit of $REF (default
-# origin/main) that changed what the base is built from and whose tag is published. On a push to main the publish
-# workflow runs next to the tests, so the tag of that commit may not be there yet; an earlier one always is. Used by
+# Prints the tag of the newest published base image (ghcr.io/alfsch/agent-pod-base) that can be
+# pulled and whose signature verifies: the one of the checked-out tree if it does, else the one of the newest commit of $REF
+# (default origin/main) that changed what the base is built from and whose tag does. On a push to main the publish
+# workflow runs next to the tests and pushes the tag before it signs it, so the tag of that commit may be there without
+# its signature, or not at all; an earlier one always is. A tag that does not verify is skipped here whatever the reason:
+# this picks a base for the next step to run the check on, it is not where a signature is trusted. Used by
 # integration-tests.yaml. Run from the repository root, with enough history fetched. Exit 1 when none is found.
 set -euo pipefail
-REPO="${AGENT_POD_BASE_REPO:-ghcr.io/alfsch/agent-pod-base}"
 REF="${REF:-origin/main}"
 FILES=(install.sh Dockerfile.base pod-environment.md)
 
-published() { docker manifest inspect "$REPO:$1" >/dev/null 2>&1; }
+# install.sh --verify-base pulls the tag and verifies it with the cosign container, as the next step does
+published() { ./install.sh --verify-base "$1" >/dev/null 2>&1 || { echo "skipping $1: not published, or its signature is not there (yet)" >&2; return 1; }; }
 
 tag="$(./install.sh --base-hash)"
 if published "$tag"; then echo "$tag"; exit 0; fi
