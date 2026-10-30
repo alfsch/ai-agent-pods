@@ -93,6 +93,17 @@ test that fails without it.
   The workflow signs the digest it computed from the manifest it pushed (and checked is in the registry), never the
   result of a later tag lookup: anything else writing to the package could have moved the tag, and the workflow would
   sign that with its own identity.
+- `prune-base-images.yaml` (script `.github/scripts/prune-base-images.sh`) removes old versions of the published base,
+  which `publish-base.yaml` only adds to. It keeps and removes **whole images**: a tag is the index, its per-architecture
+  children (read from the index) and its cosign signature, so a rule such as "delete the untagged versions" would break
+  the tags that are still in use. Kept: the `KEEP_TAGS` newest hash tags (default 5, at least 1, so the newest stays
+  whatever its age), every tag pushed within `KEEP_DAYS` days (default 30), tags the workflow does not make, and untagged
+  versions younger than `GRACE_HOURS` (default 24, a publish may still be running). It decides nothing when no hash-tagged
+  version is found or the manifest list of a kept index cannot be read, and it is a dry run unless `DRY_RUN` is exactly
+  `false`. Change the limits with the workflow inputs `keep_tags` and `keep_days`. It shares the `publish-base` concurrency
+  group so it never runs next to a publish. `decide` is pure and tested with fixtures and mutants. Deletions go indexes
+  first, then signatures, then the untagged manifests, and a failed index deletion stops the run before its dependencies
+  are touched (the next run tries again).
 - The agent layer of `Dockerfile` runs `<agent> --version` and installs again (three tries) when that fails: npm can
   succeed while the agent's platform-specific optional package did not download, and the CLI then only says "no platform
   package found" when it runs (seen as a flaky integration test). Do not drop the check or the retries; `install.sh`

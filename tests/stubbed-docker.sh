@@ -15,6 +15,7 @@ ITEST="${ITEST:-$ROOT/tests/integration.sh}"
 PUBTAG="${PUBTAG:-$ROOT/tests/published-base-tag.sh}"   # picks the published base that integration-tests.yaml verifies
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
+PRUNE="${PRUNE:-$ROOT/.github/scripts/prune-base-images.sh}"   # the script that prune-base-images.yaml runs
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
@@ -1148,10 +1149,162 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
   [ ! -s "$d/output" ] || fail "a digest was handed on although the manifest was not in the registry"; not_logged '^cosign'
 }
 
+# The world of the prune tests: img <n> <age in hours> <child digest numbers>... registers the image with the hash tag
+# H<n> (index digest n; PRUNE_TAG=<tag> gives it that tag instead), its signature version (tag SIG<n>) and the children it lists; untagged <id> <age> adds a
+# version nobody tags (a child, or an orphan). PRUNE_TOUCH_ID=<id> PRUNE_TOUCH_H=<hours> make that version's updated_at that
+# many hours old while its created_at stays as it is (a tag that was pushed again). Ids of the untagged versions are their digest numbers.
+prune_world() { SPEC=; CH='{}'; NOWV=2000000000; command -v jq >/dev/null 2>&1 || fail "the prune tests need jq"; }
+prune_dg() { printf 'sha256:%064d' "$1"; }
+prune_sig() { printf 'sha256-%064d.sig' "$1"; }
+prune_img() {
+  local n="$1" age="$2" k kids='[]'; shift 2
+  SPEC="$SPEC$n $(prune_dg "$n") ${PRUNE_TAG:-H$n} $age"$'\n'"$((100 + n)) $(prune_dg $((5000 + n))) SIG$n $age"$'\n'
+  for k in "$@"; do kids="$(jq -c --arg x "$(prune_dg "$k")" '. + [$x]' <<<"$kids")"; done
+  CH="$(jq -c --arg i "$(prune_dg "$n")" --argjson k "$kids" '. + {($i): $k}' <<<"$CH")"
+}
+prune_untagged() { SPEC="$SPEC$1 $(prune_dg "$1") - $2"$'\n'; }
+prune_tagged() { SPEC="$SPEC$1 $(prune_dg "$1") $2 $3"$'\n'; }   # prune_tagged <id> <tag> <age>: a version with a tag of its own
+prune_versions() {   # the package versions as the API returns them, from SPEC
+  local id dg tags age out=
+  while read -r id dg tags age; do
+    [ -n "$id" ] || continue
+    case "$tags" in
+      -) tags= ;;
+      H[0-9]*) tags="$(printf '%016x' "${tags#H}")" ;;
+      SIG[0-9]*) tags="$(prune_sig "${tags#SIG}")" ;;
+    esac
+    out="$out$id	$dg	$age	$tags"$'\n'
+  done <<<"$SPEC"
+  printf '%s' "$out" | jq -Rn --argjson now "$NOWV" --arg touch_id "${PRUNE_TOUCH_ID:-}" --argjson touch_h "${PRUNE_TOUCH_H:-0}" '[inputs | split("\t") | {id: (.[0] | tonumber), name: .[1],
+    created_at: ($now - (.[2] | tonumber) * 3600 | todate), updated_at: ($now - (.[2] | tonumber) * 3600 | todate), metadata: {container: {tags: (.[3] | split(" ") | map(select(length > 0)))}}}]
+    | map(if (.id | tostring) == $touch_id then .updated_at = ($now - $touch_h * 3600 | todate) else . end)'
+}
+prune_decide() {   # prune_decide <VAR=value>... : the plan for the world, in OUT; RC is the exit code
+  RC=0; OUT="$(jq -n --argjson v "$(prune_versions)" --argjson c "$CH" '{versions: $v, children: $c}' | env NOW="$NOWV" "$@" "$PRUNE" decide 2>"$CASE/err")" || RC=$?
+  printf '%s\n' "$OUT" > "$CASE/out"
+}
+prune_is() {   # prune_is <keep|delete> <id>...
+  local want="$1" id got; shift
+  for id in "$@"; do
+    got="$(awk -F'\t' -v i="$id" '$2 == i { print $1 }' <<<"$OUT")"
+    [ "$got" = "$want" ] || fail "version $id: ${got:-no verdict}, expected $want"
+  done
+}
+
+test_prune_decide() {   # whole images are kept or removed: the children, the signature, a child that two images share
+  setup_case
+  # A: two tags are kept (KEEP_TAGS=2), the older ones go with their signatures and their children
+  prune_world
+  prune_img 1 24 1001 1002; prune_img 2 240 2001 2002; prune_img 3 960 2002 3001; prune_img 4 2160 4001 4002
+  prune_untagged 1001 24; prune_untagged 1002 24; prune_untagged 2001 240; prune_untagged 2002 240; prune_untagged 3001 960
+  prune_untagged 4001 2160; prune_untagged 4002 2160
+  PRUNE_TAG=latest prune_img 5 3000 5001; prune_untagged 5001 3000   # a tag the workflow does not make: kept whole
+  prune_untagged 6 2; prune_untagged 7 48          # an orphan inside and one outside the grace period
+  prune_tagged 108 "$(prune_sig 99)" 100           # the signature of an index that is not there
+  prune_decide KEEP_TAGS=2 KEEP_DAYS=30 GRACE_HOURS=24; rc_is 0
+  prune_is keep 1 101 1001 1002 2 102 2001 2002     # the newest two images, whole
+  prune_is delete 3 103 3001 4 104 4001 4002        # the older ones, whole, except what a kept image shares: 2002 above
+  prune_is keep 5 105 5001                          # nobody removes a tag somebody pushed on purpose, nor its signature or children
+  prune_is keep 6; prune_is delete 7                # the grace period
+  prune_is delete 108                               # a signature of an image that is gone
+  # B: a tag beyond KEEP_TAGS stays while it is younger than KEEP_DAYS
+  prune_world; prune_img 1 24; prune_img 2 120; prune_img 3 960
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101 102; prune_is delete 3 103
+  # C: the newest tag stays whatever its age
+  prune_world; prune_img 1 2160; prune_img 2 2880
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101; prune_is delete 2 102
+  # H: a tag pushed again is as young as that push, not as old as the version it points at
+  prune_world; prune_img 1 24; prune_img 2 2880; prune_img 3 2880
+  PRUNE_TOUCH_ID=2 PRUNE_TOUCH_H=48 prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101; prune_is delete 3 103
+  # I: an old hash-tagged index that a kept custom-tagged one refers to stays, with what is below it and its signature
+  prune_world; prune_img 1 24 1001; prune_img 3 2880 3001; PRUNE_TAG=latest prune_img 5 3000 3 3001
+  prune_untagged 1001 24; prune_untagged 3001 2880
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 103 3001
+  # D: nothing is decided without a hash-tagged version (a listing that failed must not delete the lot)
+  prune_world; prune_untagged 7 48; prune_tagged 108 "$(prune_sig 99)" 100
+  prune_decide; [ "$RC" != 0 ] || fail "a package without a hash-tagged version was decided on"
+  ! grep -q delete "$CASE/out" || fail "a plan was printed for a package without a hash-tagged version"
+  # E: nor when the children of a kept index are unknown; those of an index that goes do not matter
+  prune_world; prune_img 1 24 1001; prune_img 2 2160 2001; prune_untagged 1001 24; prune_untagged 2001 2160
+  CH="$(jq -c --arg i "$(prune_dg 1)" 'del(.[$i])' <<<"$CH")"
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; [ "$RC" != 0 ] || fail "the children of a kept index were unknown and a plan was made"
+  CH="$(jq -c --arg i "$(prune_dg 2)" 'del(.[$i])' <<<"$CH")"; prune_img 1 24 1001; prune_decide KEEP_TAGS=1 KEEP_DAYS=30
+  rc_is 0; prune_is keep 1001; prune_is delete 2 2001
+  # G: nor when the children of a custom-tagged image are unknown: it is kept, and so are they
+  prune_world; prune_img 1 24 1001; PRUNE_TAG=latest prune_img 5 3000 5001; prune_untagged 1001 24; prune_untagged 5001 3000
+  CH="$(jq -c --arg i "$(prune_dg 5)" 'del(.[$i])' <<<"$CH")"
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; [ "$RC" != 0 ] || fail "the children of a custom-tagged image were unknown and a plan was made"
+  # F: at least one tag is kept
+  prune_world; prune_img 1 2160 1001; prune_untagged 1001 2160
+  prune_decide KEEP_TAGS=0 KEEP_DAYS=30; [ "$RC" != 0 ] || fail "KEEP_TAGS=0 was accepted"
+}
+
+test_prune_run() {   # the script lists, decides, and deletes only when DRY_RUN is exactly false
+  local d bin leaf
+  setup_case; d="$CASE/prune"; bin="$d/bin"; mkdir -p "$bin" "$d/manifests"
+  prune_world; prune_img 1 24 1001; prune_img 2 2880 2001; prune_untagged 1001 24; prune_untagged 2001 2880
+  PRUNE_TAG=latest prune_img 3 2880 3001; prune_untagged 3001 2880; prune_untagged 3002 2880   # a custom-tagged image with old children, nested: kept whole
+  local versions; versions="$(prune_versions)"
+  jq -c '.[:3]' <<<"$versions" > "$d/page1.json"; jq -c '.[3:]' <<<"$versions" > "$d/page2.json"   # two pages, as --paginate prints them
+  printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 1001)" > "$d/manifests/$(prune_dg 1)"
+  printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 2001)" > "$d/manifests/$(prune_dg 2)"
+  printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3001)" > "$d/manifests/$(prune_dg 3)"
+  printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3002)" > "$d/manifests/$(prune_dg 3001)"   # an index below an index
+  for leaf in 1001 2001 3002; do printf '{"schemaVersion":2}' > "$d/manifests/$(prune_dg "$leaf")"; done
+  cat >"$bin/gh" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/gh.log"
+case "$*" in
+  *"-X DELETE"*) last="${!#}"; [ "${STUB_DELETE_FAIL:-}" = "${last##*/}" ] && exit 1; exit 0 ;;
+  *--paginate*) cat "$STUB_DIR/page1.json" "$STUB_DIR/page2.json" ;;
+  *) exit 1 ;;
+esac
+STUB
+  cat >"$bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >> "$STUB_DIR/docker.log"
+[ "$1 $2 $3" = "buildx imagetools inspect" ] || exit 1
+ref="${!#}"; digest="${ref##*@}"; [ "${STUB_MANIFEST_FAIL:-}" != "$digest" ] || exit 1
+cat "$STUB_DIR/manifests/$digest"
+STUB
+  chmod +x "$bin/gh" "$bin/docker"
+  pr() {   # pr <VAR=value>... : the script as the workflow runs it, with a stubbed gh and docker; DELETE calls are in gh.log
+    : > "$d/gh.log"; : > "$d/docker.log"; RC=0
+    env PATH="$bin:$PATH" STUB_DIR="$d" GITHUB_REPOSITORY_OWNER=Owner NOW="$NOWV" KEEP_TAGS=1 KEEP_DAYS=30 "$@" "$PRUNE" >"$CASE/out" 2>"$CASE/err" || RC=$?
+  }
+  deletes() { grep -c -- '-X DELETE' "$d/gh.log" || true; }
+  # no DRY_RUN: the safe default, the plan is printed and nothing is deleted
+  pr; rc_is 0; [ "$(deletes)" = 0 ] || fail "a run without DRY_RUN deleted"
+  in_out 'delete +2 '; in_out 'keep +1 '; in_out 'dry run: nothing deleted'
+  grep -q 'ghcr.io/owner/agent-pod-base@sha256:' "$d/docker.log" || fail "the manifest was not read from the image of the lower-cased owner"
+  # anything but exactly false is a dry run
+  pr DRY_RUN=true; rc_is 0; [ "$(deletes)" = 0 ] || fail "DRY_RUN=true deleted"
+  pr DRY_RUN=no; rc_is 0; [ "$(deletes)" = 0 ] || fail "DRY_RUN=no deleted"
+  # false deletes what the plan says, the old image whole, over the API path of the owner, and nothing else
+  pr DRY_RUN=false; rc_is 0
+  [ "$(deletes)" = 3 ] || fail "expected 3 deletions, got $(deletes)"
+  [ "$(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')" = "2 102 2001 " ] || fail "not the index, then its signature, then the manifests: $(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')"
+  for id in 2 102 2001; do grep -q -- "-X DELETE /users/Owner/packages/container/agent-pod-base/versions/$id\$" "$d/gh.log" || fail "version $id was not deleted"; done
+  for id in 3 103 3001 3002; do ! grep -q -- "-X DELETE .*/versions/$id\$" "$d/gh.log" || fail "version $id of the custom-tagged image was deleted"; done
+  # the manifest list of a kept index cannot be read: nothing is deleted
+  pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 1)"; [ "$RC" != 0 ] || fail "a kept index with an unreadable manifest list did not stop the run"
+  [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a kept index were unknown"
+  # nor when the manifest list of the custom-tagged image cannot be read
+  pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3)"; [ "$RC" != 0 ] || fail "a custom-tagged image with an unreadable manifest list did not stop the run"
+  [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a custom-tagged image were unknown"
+  # nor when something below it cannot be read
+  pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3002)"; [ "$RC" != 0 ] || fail "an unreadable manifest below a custom-tagged image did not stop the run"
+  [ "$(deletes)" = 0 ] || fail "something was deleted although a manifest below a custom-tagged image was unknown"
+  # an index cannot be deleted: its signature and manifests are not touched
+  pr DRY_RUN=false STUB_DELETE_FAIL=2; rc_is 1; [ "$(deletes)" = 1 ] || fail "after a failed index deletion $(deletes) deletions were tried, expected only that one"
+  # one deletion fails: the others are still tried, and the run fails
+  pr DRY_RUN=false STUB_DELETE_FAIL=102; rc_is 1; [ "$(deletes)" = 3 ] || fail "a failed deletion stopped the others"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -1385,6 +1538,31 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_publish_signs_created_digest "digest=\"sha256:\$(printf '%s' \"\$manifest\"" "digest=\"sha256:\$(printf '%s' \"\$sources\"" .github/workflows/publish-base.yaml || rc=1
   mutate test_publish_signs_created_digest '          docker buildx imagetools inspect "$IMAGE@$digest"' '          true' .github/workflows/publish-base.yaml || rc=1
   mutate test_publish_signs_created_digest '          echo "digest=$digest" >> "$GITHUB_OUTPUT"' '          true' .github/workflows/publish-base.yaml || rc=1
+  mutate test_prune_decide '([$kept[], $others[]] | map($ch[.name][]?)) as $protected' '[] as $protected' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'elif ts >= $grace then ["keep", "untagged", "younger than the grace period"]' 'elif false then ["keep", "untagged", "younger than the grace period"]' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'map(select(.key < $keep_tags or (.value | ts) >= $cutoff))' 'map(select(.key < $keep_tags))' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'map(select(.key < $keep_tags or (.value | ts) >= $cutoff))' 'map(select((.value | ts) >= $cutoff))' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'if ($unknown | length) > 0 then' 'if false then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'if ($hashed | length) == 0 then error(' 'if false then error(' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'if $keep_tags < 1 then error(' 'if false then error(' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '["delete", "signature", "signature of a removed image"]' '["keep", "signature", "signature of a removed image"]' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'then ["keep", "other", "tag not set by the publish workflow: "' 'then ["delete", "other", "tag not set by the publish workflow: "' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '["delete", "untagged", "untagged and not part of a kept image"]' '["keep", "untagged", "untagged and not part of a kept image"]' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'DRY_RUN="${DRY_RUN:-true}"' 'DRY_RUN="${DRY_RUN:-false}"' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'if [ "$DRY_RUN" != false ]; then' 'if [ "$DRY_RUN" = true ]; then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '[ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }' '[ "$failed" = 0 ] || true' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run "tr '[:upper:]' '[:lower:]'" 'cat' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run "jq -s 'add // []'" "jq -s '.[0] // []'" .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown' '($kept | map(select($ch[.name] == null) | .name)) as $unknown' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)' 'any(test("^[0-9a-f]{16}$"))' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);' '    def ts: (.created_at | fromdateiso8601);' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; done' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; descend "$k" || true; done' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'if ($protected | any(. == $x.name)) then ["keep", "untagged", "part of a kept image"]' 'if false then ["keep", "untagged", "part of a kept image"]' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'for kind in index signature untagged; do' 'for kind in untagged signature index; do' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'if [ "$kind" = index ] && [ "$failed" != 0 ]; then' 'if false; then' .github/scripts/prune-base-images.sh || rc=1
   return $rc
 }
 
