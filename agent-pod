@@ -47,13 +47,14 @@ usage() {
   row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
   row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
   row "Git identity:"      "AGENT_POD_GITCONFIG=~/.gitconfig-work $HERE/agent-pod claude"
+  row "Second login:"      "AGENT_POD_PROFILE=work $HERE/agent-pod claude"
   row "Extra skills:"      "AGENT_POD_SKILLS_DIR=~/skills $HERE/agent-pod claude"
   printf '\n'
   row "Shortcut aliases:"  "alias claude-pod=$HERE/claude-pod"
   row ""                   "alias copilot-pod=$HERE/copilot-pod"
   row ""                   "alias goose-pod=$HERE/goose-pod"
-  row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod, $HOME/.goose-pod (login, history)"
-  row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/<agent>.json (trust state)"
+  row "Settings:"          "$HOME/.claude-pod, $HOME/.copilot-pod, $HOME/.goose-pod (login, history; -<profile> added with AGENT_POD_PROFILE)"
+  row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/<agent>[-<profile>].json (trust state)"
   row ""                   "${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod/[<agent>.]gitconfig (git identity, read-only in the pod)"
   row "Full README:"       "https://github.com/alfsch/ai-agent-pods"
 }
@@ -112,6 +113,19 @@ case "$AGENT" in
     ;;
 esac
 IMAGE="agent-pod:$AGENT"
+
+# AGENT_POD_PROFILE=<name>: another login of the same agent (work and private account, say). The name is added to every
+# host path that is kept per agent: the state dir (~/.claude-pod-<name>) and, in the config dir, the account file
+# (<agent>-<name>.json), the mounted dirs (<agent>-<name>-skills) and the git config (<agent>-<name>.gitconfig).
+# A_KEY is that per-agent name; without a profile it is the agent, so nothing changes. The name ends up in paths and in the
+# uninstaller's glob, so it is restricted to letters, digits, - and _ (starting with a letter or digit), at most 32. The
+# match runs in the C locale: in others (macOS) a range such as A-Z also takes accented letters.
+valid_profile_name() { local LC_ALL=C; case "$1" in ""|*[!A-Za-z0-9_-]*|[!A-Za-z0-9]*) return 1 ;; esac; [ "${#1}" -le 32 ]; }
+A_KEY="$AGENT"
+if [ -n "${AGENT_POD_PROFILE:-}" ]; then
+  valid_profile_name "$AGENT_POD_PROFILE" || die "AGENT_POD_PROFILE=$AGENT_POD_PROFILE is not a valid name: use letters, digits, - and _, starting with a letter or digit, at most 32 characters."
+  A_KEY="$AGENT-$AGENT_POD_PROFILE"; A_STATE_DIR="$A_STATE_DIR-$AGENT_POD_PROFILE"
+fi
 
 # Preflight checks, in causal order. Without these the failures surface as cryptic Docker errors:
 #   - daemon down -> the image check below would falsely blame a missing image.
@@ -197,13 +211,13 @@ mkdir -p "$A_STATE_DIR"
 
 # The agent reads its main config (account binding, project trust state) from $HOME/$A_CFG_FILE, a file at HOME next
 # to the $A_CFG_DIR/ directory. It is one file per agent on the host, used by every project and every session, and
-# edited there: ${XDG_CONFIG_HOME:-~/.config}/agent-pod/<agent>.json. It lives outside the state dir on purpose: the
+# edited there: ${XDG_CONFIG_HOME:-~/.config}/agent-pod/<agent>.json (<agent>-<profile>.json with a profile). It lives outside the state dir on purpose: the
 # pod can write to the state dir, and a symlink it left in place of the file would make the host-side steps here and
 # Docker's bind mount follow it to a file outside the project, such as an SSH key. The pod gets the file, never
 # the directory around it, so it cannot replace it.
 # An agent without a config file (A_CFG_FILE empty) keeps it all in its state dir and has none of this.
 A_CFG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-pod"
-A_CFG_PATH="$A_CFG_HOME/$AGENT.json"
+A_CFG_PATH="$A_CFG_HOME/$A_KEY.json"
 if [ -n "$A_CFG_FILE" ]; then
   mkdir -p "$A_CFG_HOME"
   # Docker creates a directory at the target if the source path is missing, so the file must pre-exist on the host
@@ -215,13 +229,13 @@ fi
 # so a dir the agent writes there is a mount from the host, one per agent.
 EXTRA_MOUNTS=()
 for _d in $A_EXTRA_DIRS; do
-  mkdir -p "$A_CFG_HOME/$AGENT-${_d##*/}"; chmod 700 "$A_CFG_HOME" "$A_CFG_HOME/$AGENT-${_d##*/}"
-  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$AGENT-${_d##*/}:/home/agent-pod/$_d")
+  mkdir -p "$A_CFG_HOME/$A_KEY-${_d##*/}"; chmod 700 "$A_CFG_HOME" "$A_CFG_HOME/$A_KEY-${_d##*/}"
+  EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$A_KEY-${_d##*/}:/home/agent-pod/$_d")
 done
 
 # The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
 # thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
-# commit as another identity); else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
+# commit as another identity); else <agent>-<profile>.gitconfig (with a profile), else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
 # would create a directory for a missing source). It stays outside the state dir, which the pod can write, and the pod
 # cannot change it. Whatever it holds is visible to the pod: keep it to the identity. The path is made absolute (Docker
 # takes a relative source for a volume name), and a file in a directory the pod can write (the project, the state dir, the
@@ -230,6 +244,7 @@ GIT_MOUNT=()
 if [ -n "${AGENT_POD_GITCONFIG:-}" ]; then
   [ -f "$AGENT_POD_GITCONFIG" ] || die "AGENT_POD_GITCONFIG=$AGENT_POD_GITCONFIG is not a file."
   _g="$AGENT_POD_GITCONFIG"
+elif [ -f "$A_CFG_HOME/$A_KEY.gitconfig" ]; then _g="$A_CFG_HOME/$A_KEY.gitconfig"
 elif [ -f "$A_CFG_HOME/$AGENT.gitconfig" ]; then _g="$A_CFG_HOME/$AGENT.gitconfig"
 elif [ -f "$A_CFG_HOME/gitconfig" ]; then _g="$A_CFG_HOME/gitconfig"
 else _g=
@@ -237,7 +252,7 @@ fi
 if [ -n "$_g" ]; then
   _gd="$(cd "$(dirname "$_g")" && pwd -P)" || die "Cannot use $_g."
   _g="$_gd/$(basename "$_g")"
-  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$AGENT-${_d##*/}"); done
+  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-${_d##*/}"); done
   for _w in "${_writable[@]}"; do
     _w="$(cd "$_w" && pwd -P)" || continue
     case "$_gd/" in "$_w"/*) die "The git config $_g is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
@@ -261,7 +276,7 @@ if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then
   case "$A_SKILLS_TARGET" in "$A_CFG_DIR"/*) mkdir -p "$A_STATE_DIR/${A_SKILLS_TARGET#"$A_CFG_DIR"/}" ;; esac
   # the writable roots, resolved: the project, the state dir, the dirs mounted from the config dir, the agent's config file
   _wr=(); for _w in "$PWD" "$A_STATE_DIR"; do _wr+=("$(cd "$_w" && pwd -P)"); done
-  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$AGENT-${_d##*/}" && pwd -P)"); done
+  for _d in $A_EXTRA_DIRS; do _wr+=("$(cd "$A_CFG_HOME/$A_KEY-${_d##*/}" && pwd -P)"); done
   if [ -n "$A_CFG_FILE" ]; then   # a symlink the user made there is followed by Docker's mount
     _f="$A_CFG_PATH"; _n=0
     while [ -L "$_f" ] && [ "$_n" -lt 10 ]; do

@@ -92,6 +92,26 @@ goose is installed from the static (musl) Linux binary of the release, which run
 
 Run `/login` in Claude Code or Copilot CLI (`goose configure` in goose) and follow the prompt. The session persists in the agent's state dir and survives restarts, once per machine. The dirs keep the names of the single-agent tools ([claude-pod](https://github.com/trekhleb/claude-pod), copilot-pod), so existing logins carry over. For Copilot you can export a token on the host instead; it is then visible to everything in the container.
 
+### Several logins of one agent
+
+`AGENT_POD_PROFILE=<name>` gives an agent another login, for example a work and a private account. The name is added to every host path that is kept per agent, so the profile shares nothing with the default login or with another profile:
+
+| What | Default | With `AGENT_POD_PROFILE=work` |
+|---|---|---|
+| Login, settings, history | `~/.claude-pod/` | `~/.claude-pod-work/` |
+| Account binding, trust state | `~/.config/agent-pod/claude.json` | `~/.config/agent-pod/claude-work.json` |
+| Mounted global skills dirs | `~/.config/agent-pod/claude-skills/` | `~/.config/agent-pod/claude-work-skills/` |
+| Git identity | `claude.gitconfig`, else `gitconfig` | `claude-work.gitconfig`, else `claude.gitconfig`, else `gitconfig` |
+
+The same holds for `copilot` and `goose`. Log in once per profile (`/login`, or `goose configure`); everything is created on the first start. Without the variable nothing changes. Aliases keep it short:
+
+```bash
+alias claude-work='AGENT_POD_PROFILE=work claude-pod'
+alias copilot-private='AGENT_POD_PROFILE=private copilot-pod'
+```
+
+The name is part of file names, so it may only hold letters, digits, `-` and `_`, must start with a letter or digit, and is at most 32 characters long; anything else stops the launcher. The Docker cache (`DOCKER_CACHE=1`) is per project and shared by all profiles.
+
 ### Where settings live
 
 Everything is on the host, once for all projects, and you change it by editing the files there:
@@ -118,6 +138,7 @@ All of them are environment variables in front of the launcher:
 | `DOCKER_CACHE_MAX_AGE_DAYS=30` | prune caches unused for that long (default 90, 0 = never) |
 | `DIND_IMAGE=...` | another sidecar image (pin by digest) |
 | `AGENT_POD_GITCONFIG=~/.gitconfig-work` | the git config used as the pod's global one (see below); must be a file |
+| `AGENT_POD_PROFILE=work` | a second login of the same agent, kept in its own state dir and files (see [Several logins](#several-logins-of-one-agent)); letters, digits, `-` and `_`, at most 32 |
 | `AGENT_POD_SKILLS_DIR=~/skills` | a host folder of skills (`<name>/SKILL.md`), mounted read-only as one skill each into the agent's personal skills dir; see below |
 
 **Git identity.** The pod's home is thrown away, so git has no name or email in it and commits fail with "Author identity unknown". Put a git config with just the identity (author and committer both come from it) in `~/.config/agent-pod/gitconfig`:
@@ -128,7 +149,7 @@ All of them are environment variables in front of the launcher:
     email = you@example.com
 ```
 
-The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file; for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity; a file in the project folder or in a directory the pod can write is refused too, because the pod could swap it for a symlink to a host file). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
+The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file (with `AGENT_POD_PROFILE`, `<agent>-<profile>.gitconfig` wins over both); for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity; a file in the project folder or in a directory the pod can write is refused too, because the pod could swap it for a symlink to a host file). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
 
 ### Using Docker inside the pod
 
@@ -182,7 +203,7 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 
 ### Side effects outside the project folder
 
-- `~/.claude-pod/`, `~/.copilot-pod/` and `~/.goose-pod/`: auth, settings, session history (transcripts can contain code and command output the agent saw).
+- `~/.claude-pod/`, `~/.copilot-pod/` and `~/.goose-pod/`: auth, settings, session history (transcripts can contain code and command output the agent saw). With `AGENT_POD_PROFILE=<name>` the same with `-<name>` added, and `<agent>-<name>.json` and `<agent>-<name>-*` dirs in `~/.config/agent-pod/`. `uninstall.sh` removes these too (it lists them first).
 - `~/.config/agent-pod/claude.json` and `copilot.json` (under `$XDG_CONFIG_HOME` if set): the agent's account binding and project trust state, one file per agent for all projects. Edit them there. They are outside the state dirs on purpose: the pod can write to a state dir, and a symlink it left in place of the file would make the launcher and Docker follow it to a host file. The pod gets the file, not its directory. If you used the single-agent claude-pod or copilot-pod before, copy its `.claude.json` or `.copilot.json` from the state dir to that path to keep the trust state (login credentials stay in the state dir).
 - `~/.config/agent-pod/gitconfig` and `<agent>.gitconfig` (or the file named by `AGENT_POD_GITCONFIG`): only read, never written, and mounted read-only.
 - `~/.claude-pod/skills/<name>/`, `~/.copilot-pod/skills/<name>/` or `~/.config/agent-pod/goose-skills/<name>/`: empty mount-point folders for the skills of `AGENT_POD_SKILLS_DIR`. The skills themselves are only read, mounted read-only.

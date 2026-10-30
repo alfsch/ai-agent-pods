@@ -13,7 +13,7 @@ are in `README.md`.
 - Everything that differs between the agents is in the agent table (`case "$AGENT"`) at the top of `agent-pod`
   and the same values in `install.sh` (source, package or repository, default channel, version variable). Anything else that
   mentions an agent by name is a bug: the sidecar, cache and signal logic are the same for all.
-- State dirs stay `~/.claude-pod` and `~/.copilot-pod` (goose: `~/.goose-pod`) so existing logins keep working; the container home is
+- State dirs stay `~/.claude-pod` and `~/.copilot-pod` (goose: `~/.goose-pod`) so existing logins keep working; `AGENT_POD_PROFILE=<name>` adds `-<name>` to them and, through `A_KEY` (the agent, plus `-<name>`), to every other host path that is kept per agent, so a new per-agent path must use `A_KEY`, not `AGENT`; the container home is
   `/home/agent-pod` for all. The Docker cache is per project, not per agent.
 - The agent's config file (`.claude.json`, `.copilot.json`) lives in `~/.config/agent-pod/<agent>.json`, never in
   the state dir: the pod can write to the state dir and could leave a symlink in place of the file. The pod gets
