@@ -16,6 +16,7 @@ PUBTAG="${PUBTAG:-$ROOT/tests/published-base-tag.sh}"   # picks the published ba
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 PRUNE="${PRUNE:-$ROOT/.github/scripts/prune-base-images.sh}"   # the script that prune-base-images.yaml runs
+PRUNEWF="${PRUNEWF:-$ROOT/.github/workflows/prune-base-images.yaml}"   # that workflow, whose schedule is checked in test_prune_workflow_schedule
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
@@ -1323,6 +1324,8 @@ STUB
   [ "$(deletes)" = 0 ] || fail "something was deleted although a manifest below a custom-tagged image was unknown"
   # an index cannot be deleted: its signature and manifests are not touched
   pr DRY_RUN=false STUB_DELETE_FAIL=2; rc_is 1; [ "$(deletes)" = 1 ] || fail "after a failed index deletion $(deletes) deletions were tried, expected only that one"
+  # a scheduled run has empty inputs: the defaults apply (5 tags, 30 days, no cap), so both images stay and nothing fails
+  pr DRY_RUN=false KEEP_TAGS= KEEP_DAYS= MAX_DELETES=; rc_is 0; not_in_out 'must be a number'; [ "$(deletes)" = 0 ] || fail "empty inputs did not fall back to the defaults: $(deletes) deletions"
   # MAX_DELETES caps the deletions, indexes and signatures first; the rest is left for a later run
   pr DRY_RUN=false MAX_DELETES=2; rc_is 0; [ "$(deletes)" = 2 ] || fail "MAX_DELETES=2 allowed $(deletes) deletions"
   [ "$(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')" = "2 102 " ] || fail "not the index and its signature first: $(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')"
@@ -1336,10 +1339,22 @@ STUB
   pr DRY_RUN=false STUB_DELETE_FAIL=2001; rc_is 1; [ "$(deletes)" = 4 ] || fail "a failed deletion stopped the others"
 }
 
+test_prune_workflow_schedule() {   # the prune runs daily and really deletes then, next to the publish workflow's concurrency group
+  local cron re want
+  cron="$(sed -n 's/^    - cron: "\(.*\)"$/\1/p' "$PRUNEWF")"
+  re='^[0-9]+ [0-9]+ \* \* \*$'
+  [[ "$cron" =~ $re ]] || fail "the schedule is not one daily cron (minute hour * * *): '$cron'"
+  # a scheduled run has no inputs, and the script reads an empty DRY_RUN as a dry run: the workflow must say false itself
+  want=$'DRY_RUN: ${{ github.event_name == \'schedule\' && \'false\' || inputs.dry_run }}'
+  grep -qF "$want" "$PRUNEWF" || fail "the scheduled run does not set DRY_RUN to false: $(grep 'DRY_RUN:' "$PRUNEWF")"
+  grep -q '^  group: publish-base$' "$PRUNEWF" || fail "the prune is not in the concurrency group of the publish workflow"
+  ! grep -q 'cancel-in-progress: true' "$PRUNEWF" || fail "a running prune is cancelled, not finished"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
@@ -1611,6 +1626,11 @@ done' tests/published-base-tag.sh || rc=1
 ' '    :
 ' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run '[ -z "$MAX_DELETES" ] || [[ "$MAX_DELETES" =~ ^[0-9]+$ ]] || {' 'true || {' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_workflow_schedule "DRY_RUN: \${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}" 'DRY_RUN: ${{ inputs.dry_run }}' .github/workflows/prune-base-images.yaml || rc=1
+  mutate test_prune_workflow_schedule '    - cron: "43 5 * * *"' '    - cron: "43 5 * * 1"' .github/workflows/prune-base-images.yaml || rc=1
+  mutate test_prune_workflow_schedule '  group: publish-base' '  group: prune-base-images' .github/workflows/prune-base-images.yaml || rc=1
+  mutate test_prune_workflow_schedule '  cancel-in-progress: false' '  cancel-in-progress: true' .github/workflows/prune-base-images.yaml || rc=1
+  mutate test_prune_run 'KEEP_TAGS="${KEEP_TAGS:-5}"' 'KEEP_TAGS="${KEEP_TAGS-5}"' .github/scripts/prune-base-images.sh || rc=1
   return $rc
 }
 
