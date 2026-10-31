@@ -13,10 +13,16 @@ Copilot CLI and goose alike; it is about the container, not about the project.
   (`python3 -m venv .venv`), a project-local `npm install`, or a binary in the project folder.
 - The network is open (registries, APIs) unless the session was started with `NET=none`. A dev server must listen on
   `0.0.0.0` to be reachable from the host, and only ports published with `PORTS` are (on the host's 127.0.0.1).
-- `docker` is a client only; there is no daemon in the container. Client-only commands work (`docker --version`,
-  `docker compose config`). Anything that needs a daemon (`build`, `run`, `ps`, `compose up`) works only if the session
-  was started with `DOCKER=1`; then it talks to a throwaway rootless daemon in a sidecar, and ports published by inner
-  containers are at `dind:<port>`, not `localhost`. Without `DOCKER=1` those commands fail.
+- `docker` is a client; whether a daemon is behind it depends on how the session was started. **If `DOCKER_HOST` is set**
+  (to `tcp://dind:2376`, with `DOCKER_TLS_VERIFY` and `DOCKER_CERT_PATH`), the session was started with `DOCKER=1` and
+  `docker` talks to a throwaway rootless daemon in a sidecar: `docker info` confirms it, and `build`, `run`, `ps` and
+  `compose up` work. That daemon is not the host's: the host's Docker socket is never mounted (there is no
+  `/var/run/docker.sock`), the host's images and containers are not visible, and ports published by inner containers are
+  at `dind:<port>`, not `localhost`. With `DOCKER_CACHE=1` its images persist between sessions of this project, which
+  you cannot tell from the environment: look with `docker image ls` before you assume an image is or is not there.
+  **If `DOCKER_HOST` is unset there is no daemon:** only client-only commands work (`docker --version`,
+  `docker compose config`) and everything else fails. You cannot start one from inside; the user has to restart the
+  session with `DOCKER=1`.
 - `gh` is authenticated only if the host had `GH_TOKEN` or `GITHUB_TOKEN` set: Copilot CLI sessions pass them on,
   Claude Code and goose sessions do not (`COPILOT_GITHUB_TOKEN` is for Copilot itself, not for `gh`). `gh auth login` works
   with the open network, but its login is lost when the session ends. There is no SSH key or git credential for pushes. `git` has an identity only if the user gave the session a git config (mounted read-only as `~/.gitconfig`); without one, commits fail with "Author identity unknown" and you can pass one per command (`git -c user.name=... -c user.email=... commit`).

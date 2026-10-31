@@ -17,6 +17,7 @@ PUBTAG="${PUBTAG:-$ROOT/tests/published-base-tag.sh}"   # picks the published ba
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 PRUNE="${PRUNE:-$ROOT/.github/scripts/prune-base-images.sh}"   # the script that prune-base-images.yaml runs
+PODENV="${PODENV:-$ROOT/pod-environment.md}"   # what the agent is told about its container, checked in test_pod_environment_docker
 PRUNEWF="${PRUNEWF:-$ROOT/.github/workflows/prune-base-images.yaml}"   # that workflow, whose schedule is checked in test_prune_workflow_schedule
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
@@ -309,6 +310,15 @@ test_plain_exec() {   # without DOCKER=1 the launcher only execs docker run (inv
   [ "$(grep -c . "$STUB_LOG")" = 3 ] || fail "expected info, image ls and one run"
   not_logged 'network|volume|--init|--privileged'
   logged "^run --rm .*agent-pod:$AGENT true\$"
+  # pod-environment.md tells the agent that an unset DOCKER_HOST means there is no daemon: a plain session must not get one
+  not_logged 'DOCKER_HOST|DOCKER_TLS_VERIFY|DOCKER_CERT_PATH'
+}
+test_pod_environment_docker() {   # the agent is told how to tell a DOCKER=1 session (sidecar daemon) from one without a daemon
+  local w; w="$(grep -n 'docker. is a client' "$PODENV" | cut -d: -f1)"; [ -n "$w" ] || fail "the docker bullet is not in $PODENV"
+  local b; b="$(sed -n "${w},/^- .gh. is authenticated/p" "$PODENV")"
+  for need in 'If `DOCKER_HOST` is set' 'tcp://dind:2376' '`docker info` confirms it' 'not the host' '/var/run/docker.sock' 'If `DOCKER_HOST` is unset there is no daemon' 'restart the'; do
+    [[ "$b" == *"$need"* ]] || fail "the docker bullet of $PODENV does not say: $need"
+  done
 }
 test_rootless_user() {   # rootless Docker maps the host user to container root: the pod must run as 0:0 to read its state dir
   setup_case; AGENT=claude launch STUB_UID=1001 STUB_GID=1001 --
@@ -381,7 +391,7 @@ test_sequence() {   # DOCKER=1: command order, run-id consistency, exit code, cl
         '^rm -f agent-pod-run-' '^ps -aq --filter label=agent-pod.run=' '^stop -t 10 sidecarid' '^rm -f -v sidecarid' \
         '^network rm agent-pod-net-' '^volume rm agent-pod-certs-'
   logged '^run --rm .* --init '
-  logged '^run --rm .*--network=agent-pod-net-.*DOCKER_HOST=tcp://dind:2376.*DOCKER_TLS_VERIFY=1'
+  logged '^run --rm .*--network=agent-pod-net-.*DOCKER_HOST=tcp://dind:2376.*DOCKER_TLS_VERIFY=1.*DOCKER_CERT_PATH=/certs/client'
   logged '^run --rm .*--cap-drop=ALL'
   local net rmnet; net="$(sed -n 's/^network create //p' "$STUB_LOG")"; rmnet="$(sed -n 's/^network rm //p' "$STUB_LOG")"
   [ -n "$net" ] && [ "$net" = "$rmnet" ] || fail "cleanup removed '$rmnet', run created '$net'"
@@ -1370,7 +1380,7 @@ mutants_flush() {   # prints the results that are done, in order, up to the firs
 mutants_finish() { wait; mutants_flush; ! ls "$MUT_DIR"/*.bad >/dev/null 2>&1; }   # fails when a mutant survived
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER n; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; pod-environment.md) var=PODENV ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   MUT_N=$((MUT_N + 1)); n=$MUT_N
@@ -1656,6 +1666,11 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_workflow_schedule '  group: publish-base' '  group: prune-base-images' .github/workflows/prune-base-images.yaml || rc=1
   mutate test_prune_workflow_schedule '  cancel-in-progress: false' '  cancel-in-progress: true' .github/workflows/prune-base-images.yaml || rc=1
   mutate test_prune_run 'KEEP_TAGS="${KEEP_TAGS:-5}"' 'KEEP_TAGS="${KEEP_TAGS-5}"' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_plain_exec 'DOCKER_FLAGS=("--rm" "-i")' 'DOCKER_FLAGS=("--rm" "-i" "-e" "DOCKER_HOST=tcp://dind:2376")' || rc=1
+  mutate test_sequence '"-e" "DOCKER_TLS_VERIFY=1" "-e" "DOCKER_CERT_PATH=/certs/client")' '"-e" "DOCKER_TLS_VERIFY=1")' || rc=1
+  mutate test_pod_environment_docker 'If `DOCKER_HOST` is unset there is no daemon' 'There may be no daemon' pod-environment.md || rc=1
+  mutate test_pod_environment_docker 'That daemon is not the host'"'"'s' 'That daemon may be the host'"'"'s' pod-environment.md || rc=1
+  mutate test_pod_environment_docker '`docker info` confirms it' 'it works' pod-environment.md || rc=1
   mutants_finish || rc=1
   return $rc
 }
