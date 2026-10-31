@@ -5,7 +5,8 @@
 # pod-environment.md), per architecture an image manifest and an attestation manifest (untagged children of the index)
 # and the cosign signature. Cosign 3 stores that as an OCI referrer: a version tagged sha256-<hex of the index digest>
 # (the OCI 1.1 fallback tag, no suffix) that is an index of its own, below which the Sigstore bundle is an untagged
-# manifest. Cosign 2 tagged a single manifest sha256-<hex>.sig; both forms are signatures here. A rule such as "delete the untagged
+# manifest. Cosign 2 tagged a single manifest sha256-<hex>.sig; both forms are signatures here, and a signature stays
+# for as long as the version it signs stays, whatever the reason (an untagged index inside the grace period included). A rule such as "delete the untagged
 # versions" would remove the children of images that are still in use, so whole images are kept or removed:
 #
 #   keep   the KEEP_TAGS newest hash tags (by when the version was last pushed: the later of created_at and updated_at,
@@ -47,7 +48,6 @@ decide() {
     def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);
     def hashtag: test("^[0-9a-f]{16}$");
     def sigtag: test("^sha256-[0-9a-f]{64}(\\.sig)?$");
-    def sig_of: "sha256-" + ltrimstr("sha256:");
     def sigkey: sub("\\.sig$"; "");
     if $keep_tags < 1 then error("KEEP_TAGS must be at least 1") else . end
     | (.children // {}) as $ch
@@ -63,8 +63,9 @@ decide() {
     | if ($unknown | length) > 0 then error("the manifests of a kept index could not be read: " + ($unknown | join(" "))) else . end
     | ($kept | map(.name)) as $kept_names
     | ([$kept[], $others[]] | map($ch[.name][]?)) as $below
-    | (([$kept[], $others[]] | map(.name)) + $below | map(sig_of)) as $kept_sigs
-    | [$v[] | select(tags | any(. as $s | sigtag and ($kept_sigs | any(. == ($s | sigkey)))))] as $kept_sig_versions
+    | ([$v[] | select((tags | length) == 0 and ts >= $grace) | .name]) as $young
+    | ($kept_names + ($others | map(.name)) + $below + $young) as $retained
+    | [$v[] | select(tags | any(. as $s | sigtag and ($retained | any(. == ("sha256:" + ($s | ltrimstr("sha256-") | sigkey))))))] as $kept_sig_versions
     | ([$kept_sig_versions[] | select($ch[.name] == null) | .name]) as $unknown_sigs
     | if ($unknown_sigs | length) > 0 then error("the manifests of a kept signature could not be read: " + ($unknown_sigs | join(" "))) else . end
     | ($below + ($kept_sig_versions | map($ch[.name][]?))) as $protected
@@ -77,7 +78,7 @@ decide() {
           then ["keep", "index", "one of the newest " + ($keep_tags | tostring) + " tags or pushed within " + ($keep_days | tostring) + " days"]
           else ["delete", "index", "older tag beyond the limits"] end)
        elif ($t | any(sigtag)) then
-         (if ($t | any(. as $s | $kept_sigs | any(. == ($s | sigkey))))
+         (if ($kept_sig_versions | any(.name == $x.name))
           then ["keep", "signature", "signature of a kept image"] else ["delete", "signature", "signature of a removed image"] end)
        elif ts >= $grace then ["keep", "untagged", "younger than the grace period"]
        else ["delete", "untagged", "untagged and not part of a kept image"] end)

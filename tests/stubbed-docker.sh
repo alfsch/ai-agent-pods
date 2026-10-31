@@ -1229,6 +1229,9 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
   prune_world; prune_img 1 24 1001; prune_img 3 2880 3001; PRUNE_TAG=latest prune_img 5 3000 3 3001
   prune_untagged 1001 24; prune_untagged 3001 2880
   prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 103 6003 3001
+  # L: a signature stays as long as the version it signs does: an untagged index inside the grace period keeps its signature and bundle, an older one loses them
+  prune_world; prune_img 1 24 1001; prune_untagged 1001 24; PRUNE_TAG=- prune_img 8 2; PRUNE_TAG=- prune_img 9 100
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30 GRACE_HOURS=24; rc_is 0; prune_is keep 1 101 8 108 6008; prune_is delete 9 109 6009
   # J: the signature of cosign 2 (a single manifest tagged sha256-<hex>.sig) is handled the same way
   prune_world; PRUNE_LEGACY=1 prune_img 1 24 1001; PRUNE_LEGACY=1 prune_img 2 2160 2001; prune_untagged 1001 24; prune_untagged 2001 2160
   prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101 1001; prune_is delete 2 102 2001
@@ -1575,8 +1578,9 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_run '[ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }' '[ "$failed" = 0 ] || true' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "tr '[:upper:]' '[:lower:]'" 'cat' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "jq -s 'add // []'" "jq -s '.[0] // []'" .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $below | map(sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $below | map(sig_of)) as $kept_sigs' '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + $below + $young) as $retained' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + ($others | map(.name)) + $below) as $retained' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + ($others | map(.name)) + $young) as $retained' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown' '($kept | map(select($ch[.name] == null) | .name)) as $unknown' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "select((.metadata.container.tags // []) | length > 0)" 'select((.metadata.container.tags // []) | any(test("^[0-9a-f]{16}$")))' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);' '    def ts: (.created_at | fromdateiso8601);' .github/scripts/prune-base-images.sh || rc=1
