@@ -19,8 +19,10 @@
 #   delete older hash tags, the signatures of removed images and the untagged versions no kept image refers to
 #
 # It refuses to decide anything when no hash-tagged version is found or when the manifest list of a kept image (a
-# custom-tagged one included) could not be read: then a child could be taken for an orphan. DRY_RUN is true unless it is exactly "false"; a dry run prints
-# the plan and deletes nothing.
+# custom-tagged one included) could not be read: then a child could be taken for an orphan. DRY_RUN is true unless it is
+# exactly "false"; a dry run prints the plan, one line per version with its full digest and tags, and deletes nothing.
+# MAX_DELETES (empty: no limit) caps the deletions of a run, indexes first: what is left over is unreferenced by then
+# and goes in the next run, so a first real run can try the permission on a few versions.
 #
 # Usage: prune-base-images.sh            lists the versions and the children of each index, prints the plan, deletes
 #        prune-base-images.sh decide     the plan from JSON on stdin: {"versions": [<package versions as the API
@@ -33,14 +35,16 @@ KEEP_TAGS="${KEEP_TAGS:-5}"
 KEEP_DAYS="${KEEP_DAYS:-30}"
 GRACE_HOURS="${GRACE_HOURS:-24}"
 DRY_RUN="${DRY_RUN:-true}"
+MAX_DELETES="${MAX_DELETES:-}"
 PACKAGE="${PACKAGE:-agent-pod-base}"
 
 for v in KEEP_TAGS KEEP_DAYS GRACE_HOURS; do
   [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "$v must be a number, got '${!v}'" >&2; exit 2; }
 done
+[ -z "$MAX_DELETES" ] || [[ "$MAX_DELETES" =~ ^[0-9]+$ ]] || { echo "MAX_DELETES must be a number or empty, got '$MAX_DELETES'" >&2; exit 2; }
 
 # Pure: versions and children in, one line per version out: action, id, digest, kind (index, signature, untagged, other),
-# reason (tab separated).
+# reason, tags (tab separated).
 decide() {
   jq -r --argjson now "${NOW:-$(date +%s)}" --argjson keep_tags "$KEEP_TAGS" --argjson keep_days "$KEEP_DAYS" \
     --argjson grace_hours "$GRACE_HOURS" '
@@ -82,7 +86,7 @@ decide() {
           then ["keep", "signature", "signature of a kept image"] else ["delete", "signature", "signature of a removed image"] end)
        elif ts >= $grace then ["keep", "untagged", "younger than the grace period"]
        else ["delete", "untagged", "untagged and not part of a kept image"] end)
-    | [.[0], ($x.id | tostring), $x.name, .[1], .[2]] | @tsv'
+    | [.[0], ($x.id | tostring), $x.name, .[1], .[2], ($t | join(","))] | @tsv'
 }
 
 if [ "${1:-}" = decide ]; then decide; exit; fi
@@ -120,7 +124,7 @@ done
 
 jq -n --slurpfile v "$tmp/versions.json" --slurpfile c "$tmp/children.json" '{versions: $v[0], children: $c[0]}' | decide > "$tmp/plan.tsv"
 
-awk -F'\t' '{ printf "%-6s %-12s %-9s %s  %s\n", $1, $2, $4, substr($3, 1, 19), $5 }' "$tmp/plan.tsv"
+awk -F'\t' '{ printf "%-6s %-12s %-9s %s  %s  [%s]\n", $1, $2, $4, $3, $5, $6 }' "$tmp/plan.tsv"
 total="$(wc -l < "$tmp/plan.tsv" | tr -d ' ')"
 doomed="$(awk -F'\t' '$1 == "delete"' "$tmp/plan.tsv" | wc -l | tr -d ' ')"
 echo "$doomed of $total versions to delete, $((total - doomed)) kept"
@@ -129,12 +133,15 @@ if [ "$DRY_RUN" != false ]; then echo "dry run: nothing deleted"; exit 0; fi
 
 # Indexes first, then signatures, then the untagged manifests: an index or a signature that cannot be deleted must not
 # lose what it points at, so a failure stops the run before its dependencies are touched (the next run tries again).
-failed=0
+failed=0; attempts=0; limited=
 for kind in index signature untagged; do
   while IFS=$'\t' read -r action id digest k _; do
     [ "$action" = delete ] && [ "$k" = "$kind" ] || continue
+    if [ -n "$MAX_DELETES" ] && [ "$attempts" -ge "$MAX_DELETES" ]; then limited=1; continue; fi
+    attempts=$((attempts + 1))
     if gh api -X DELETE "$API/versions/$id" >/dev/null; then echo "deleted $id"; else echo "could not delete $id ($digest)" >&2; failed=$((failed + 1)); fi
   done < "$tmp/plan.tsv"
   if [ "$kind" != untagged ] && [ "$failed" != 0 ]; then echo "an index or signature could not be deleted: what is below it is left alone" >&2; exit 1; fi
 done
+[ -z "$limited" ] || echo "stopped after $MAX_DELETES deletions (MAX_DELETES): the rest follows in a later run"
 [ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }
