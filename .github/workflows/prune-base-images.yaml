@@ -4,10 +4,12 @@ name: Prune base images
 # or removed (the index, its per-architecture children and its signature), see .github/scripts/prune-base-images.sh for
 # the policy. An old tag disappearing is harmless: install.sh builds the base itself when a pull fails.
 #
-# Manual only for now, and a dry run unless dry_run is switched off: the first run has to show in the log that the
-# workflow's token may list and delete versions of this package and that nothing that belongs to a kept image is on the
-# list. The weekly schedule is added once that has been read.
+# Runs every day (cron times are UTC) and deletes: a scheduled run has no inputs, so the defaults apply (5 tags, 30 days,
+# no cap) and DRY_RUN is set to false for it below; the script itself reads an empty DRY_RUN as a dry run. By hand it is a
+# dry run unless dry_run is switched off, and max_deletes caps what one run deletes.
 on:
+  schedule:
+    - cron: "43 5 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -52,7 +54,7 @@ jobs:
       - name: Prune
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DRY_RUN: ${{ inputs.dry_run }}
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
           KEEP_TAGS: ${{ inputs.keep_tags }}
           KEEP_DAYS: ${{ inputs.keep_days }}
           MAX_DELETES: ${{ inputs.max_deletes }}
