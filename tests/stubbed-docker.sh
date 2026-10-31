@@ -1192,6 +1192,7 @@ prune_decide() {   # prune_decide <VAR=value>... : the plan for the world, in OU
   RC=0; OUT="$(jq -n --argjson v "$(prune_versions)" --argjson c "$CH" '{versions: $v, children: $c}' | env NOW="$NOWV" "$@" "$PRUNE" decide 2>"$CASE/err")" || RC=$?
   printf '%s\n' "$OUT" > "$CASE/out"
 }
+prune_tags_of() { awk -F'\t' -v i="$1" '$2 == i { print $6 }' <<<"$OUT"; }   # the tags column of a version
 prune_is() {   # prune_is <keep|delete> <id>...
   local want="$1" id got; shift
   for id in "$@"; do
@@ -1215,6 +1216,7 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
   prune_is delete 3 103 6003 3001 4 104 6004 4001 4002      # the older ones, whole, except what a kept image shares: 2002 above
   prune_is keep 5 105 6005 5001                     # nobody removes a tag somebody pushed on purpose, nor its signature or children
   prune_is keep 6; prune_is delete 7                # the grace period
+  [ "$(prune_tags_of 5)" = latest ] && [ "$(prune_tags_of 1)" = "$(printf '%016x' 1)" ] && [ -z "$(prune_tags_of 7)" ] || fail "the tags column is wrong: 5=$(prune_tags_of 5) 1=$(prune_tags_of 1) 7=$(prune_tags_of 7)"
   prune_is delete 108                               # a signature of an image that is gone
   # B: a tag beyond KEEP_TAGS stays while it is younger than KEEP_DAYS
   prune_world; prune_img 1 24; prune_img 2 120; prune_img 3 960
@@ -1296,6 +1298,7 @@ STUB
   # no DRY_RUN: the safe default, the plan is printed and nothing is deleted
   pr; rc_is 0; [ "$(deletes)" = 0 ] || fail "a run without DRY_RUN deleted"
   in_out 'delete +2 '; in_out 'keep +1 '; in_out 'dry run: nothing deleted'
+  in_out "$(prune_dg 2)"; in_out "\\[$(printf '%016x' 2)\\]"   # the plan names the full digest and the tags of a version
   grep -q 'ghcr.io/owner/agent-pod-base@sha256:' "$d/docker.log" || fail "the manifest was not read from the image of the lower-cased owner"
   # anything but exactly false is a dry run
   pr DRY_RUN=true; rc_is 0; [ "$(deletes)" = 0 ] || fail "DRY_RUN=true deleted"
@@ -1320,6 +1323,13 @@ STUB
   [ "$(deletes)" = 0 ] || fail "something was deleted although a manifest below a custom-tagged image was unknown"
   # an index cannot be deleted: its signature and manifests are not touched
   pr DRY_RUN=false STUB_DELETE_FAIL=2; rc_is 1; [ "$(deletes)" = 1 ] || fail "after a failed index deletion $(deletes) deletions were tried, expected only that one"
+  # MAX_DELETES caps the deletions, indexes and signatures first; the rest is left for a later run
+  pr DRY_RUN=false MAX_DELETES=2; rc_is 0; [ "$(deletes)" = 2 ] || fail "MAX_DELETES=2 allowed $(deletes) deletions"
+  [ "$(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')" = "2 102 " ] || fail "not the index and its signature first: $(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')"
+  in_out 'stopped after 2 deletions'
+  pr DRY_RUN=false MAX_DELETES=0; rc_is 0; [ "$(deletes)" = 0 ] || fail "MAX_DELETES=0 deleted"
+  pr DRY_RUN=false MAX_DELETES=many; rc_is 2; [ "$(deletes)" = 0 ] || fail "a MAX_DELETES that is not a number deleted"
+  pr DRY_RUN=true MAX_DELETES=2; rc_is 0; [ "$(deletes)" = 0 ] || fail "a dry run with MAX_DELETES deleted"
   # a signature cannot be deleted: the bundle below it is not touched either
   pr DRY_RUN=false STUB_DELETE_FAIL=102; rc_is 1; [ "$(deletes)" = 2 ] || fail "after a failed signature deletion $(deletes) deletions were tried, expected the index and that one"
   # one deletion of an untagged manifest fails: the others are still tried, and the run fails
@@ -1594,6 +1604,13 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_decide 'def sigtag: test("^sha256-[0-9a-f]{64}(\\.sig)?$");' 'def sigtag: test("^sha256-[0-9a-f]{64}$");' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '| ($below + ($kept_sig_versions | map($ch[.name][]?))) as $protected' '| $below as $protected' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '| if ($unknown_sigs | length) > 0 then' '| if false then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($t | join(","))] | @tsv' '""] | @tsv' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '$1, $2, $4, $3, $5, $6 }' '$1, $2, $4, substr($3, 1, 19), $5, $6 }' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'if [ -n "$MAX_DELETES" ] && [ "$attempts" -ge "$MAX_DELETES" ]; then limited=1; continue; fi' 'if false; then limited=1; continue; fi' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '    attempts=$((attempts + 1))
+' '    :
+' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run '[ -z "$MAX_DELETES" ] || [[ "$MAX_DELETES" =~ ^[0-9]+$ ]] || {' 'true || {' .github/scripts/prune-base-images.sh || rc=1
   return $rc
 }
 

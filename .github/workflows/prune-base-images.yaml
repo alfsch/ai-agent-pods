@@ -20,6 +20,9 @@ on:
       keep_days:
         description: Keep every tag pushed within this many days
         default: "30"
+      max_deletes:
+        description: Delete at most this many versions in this run (empty for no limit), indexes first
+        default: ""
 
 permissions:
   contents: read
@@ -52,4 +55,5 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
           KEEP_TAGS: ${{ inputs.keep_tags }}
           KEEP_DAYS: ${{ inputs.keep_days }}
+          MAX_DELETES: ${{ inputs.max_deletes }}
         run: .github/scripts/prune-base-images.sh

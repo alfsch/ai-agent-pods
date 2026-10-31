@@ -105,7 +105,8 @@ test that fails without it.
   `false`. Change the limits with the workflow inputs `keep_tags` and `keep_days`. It shares the `publish-base` concurrency
   group so it never runs next to a publish. `decide` is pure and tested with fixtures and mutants. Deletions go indexes
   first, then signatures, then the untagged manifests, and a failed index deletion stops the run before its dependencies
-  are touched (the next run tries again).
+  are touched (the next run tries again). The plan prints each version's full digest and tags; `MAX_DELETES` (workflow
+  input `max_deletes`, empty for no limit) caps the deletions of a run, so a first real run can try the permission on a few.
 - The agent layer of `Dockerfile` runs `<agent> --version` and installs again (three tries) when that fails: npm can
   succeed while the agent's platform-specific optional package did not download, and the CLI then only says "no platform
   package found" when it runs (seen as a flaky integration test). Do not drop the check or the retries; `install.sh`
