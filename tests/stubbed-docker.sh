@@ -7,7 +7,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
+cleanup() { local p; for p in $(jobs -p); do kill -TERM -- -"$p" 2>/dev/null; done; rm -rf "$T"; }   # a job is a process group of its own (see below)
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
 UNINSTALLER="${UNINSTALLER:-$ROOT/uninstall.sh}"
@@ -1358,6 +1359,9 @@ if [ -z "${TEST_JOBS:-}" ]; then
   TEST_JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"; [ "$TEST_JOBS" -le 8 ] 2>/dev/null || TEST_JOBS=8
 fi
 [[ "$TEST_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "  ERROR     TEST_JOBS must be a positive number, got '$TEST_JOBS'" >&2; exit 2; }
+# Every job is started with job control on, as launch_bg does: a plain `cmd &` in a non-interactive shell starts it with SIGINT
+# ignored, and a test that then starts the launcher cannot make it trap INT (the signal tests failed with exit 137 in CI).
+# With job control a job also gets a process group of its own, which cleanup() signals. So: `set -m; ... & set +m`.
 slots_wait() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$TEST_JOBS" ]; do "$@"; sleep 0.05; done; }   # slots_wait [flush function]
 MUT_N=0; MUT_NEXT=1; MUT_DIR="$T/mutants"; mkdir -p "$MUT_DIR"
 mutants_flush() {   # prints the results that are done, in order, up to the first one that is not
@@ -1373,6 +1377,7 @@ mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in 
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
   printf '%s' "${src/"$old"/"$new"}" > "$T/mutant.$n"; chmod +x "$T/mutant.$n"
   slots_wait mutants_flush
+  set -m
   (
     if ( export "$var=$T/mutant.$n"; "$0" --inner "$test" >/dev/null 2>&1 ); then
       : > "$MUT_DIR/$n.bad"; echo "  SURVIVED  $test passes without: ${old%%$'\n'*}" > "$MUT_DIR/$n.tmp"
@@ -1381,6 +1386,7 @@ mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in 
     fi
     mv "$MUT_DIR/$n.tmp" "$MUT_DIR/$n.out"   # the result appears whole, once
   ) &
+  set +m
   mutants_flush
 }
 run_mutants() {
@@ -1684,7 +1690,9 @@ else
   for t in "${tests[@]}"; do
     slots_wait base_flush
     n=$BASE_N; BASE_N=$((BASE_N + 1))
+    set -m
     ( rc=0; ( "$t" ) >"$T/base/$n.out" 2>&1 || rc=$?; echo "$rc" > "$T/base/$n.tmp"; mv "$T/base/$n.tmp" "$T/base/$n.rc" ) &
+    set +m
     base_flush
   done
   wait; base_flush
