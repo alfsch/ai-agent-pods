@@ -7,7 +7,8 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 T="$(mktemp -d)"
-trap 'rm -rf "$T"' EXIT
+cleanup() { local p; for p in $(jobs -p); do kill -TERM -- -"$p" 2>/dev/null; done; rm -rf "$T"; }   # a job is a process group of its own (see below)
+trap cleanup EXIT; trap 'exit 130' INT; trap 'exit 143' TERM
 BIN="$T/bin"; mkdir -p "$BIN"
 LAUNCHER="${LAUNCHER:-$ROOT/agent-pod}"
 UNINSTALLER="${UNINSTALLER:-$ROOT/uninstall.sh}"
@@ -1352,17 +1353,41 @@ test_prune_workflow_schedule() {   # the prune runs daily and really deletes the
 }
 
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
+# Jobs: the tests and the mutants run TEST_JOBS at a time (default: the CPUs, at most 8; 1 is one after the other). Their
+# output is printed in the order they were started, as they finish. No `wait -n` (Bash 3.2), so a slot is found by polling.
+if [ -z "${TEST_JOBS:-}" ]; then
+  TEST_JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"; [ "$TEST_JOBS" -le 8 ] 2>/dev/null || TEST_JOBS=8
+fi
+[[ "$TEST_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo "  ERROR     TEST_JOBS must be a positive number, got '$TEST_JOBS'" >&2; exit 2; }
+# Every job is started with job control on, as launch_bg does: a plain `cmd &` in a non-interactive shell starts it with SIGINT
+# ignored, and a test that then starts the launcher cannot make it trap INT (the signal tests failed with exit 137 in CI).
+# With job control a job also gets a process group of its own, which cleanup() signals. So: `set -m; ... & set +m`.
+slots_wait() { while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$TEST_JOBS" ]; do "$@"; sleep 0.05; done; }   # slots_wait [flush function]
+MUT_N=0; MUT_NEXT=1; MUT_DIR="$T/mutants"; mkdir -p "$MUT_DIR"
+mutants_flush() {   # prints the results that are done, in order, up to the first one that is not
+  while [ "$MUT_NEXT" -le "$MUT_N" ] && [ -e "$MUT_DIR/$MUT_NEXT.out" ]; do cat "$MUT_DIR/$MUT_NEXT.out"; MUT_NEXT=$((MUT_NEXT + 1)); done
+}
+mutants_finish() { wait; mutants_flush; ! ls "$MUT_DIR"/*.bad >/dev/null 2>&1; }   # fails when a mutant survived
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
-  local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
+  local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER n; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
   case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
+  MUT_N=$((MUT_N + 1)); n=$MUT_N
   # the replacement is quoted: in Bash 5.2 an unquoted & in it stands for the text that was matched
-  printf '%s' "${src/"$old"/"$new"}" > "$T/mutant"; chmod +x "$T/mutant"
-  if ( export "$var=$T/mutant"; "$0" --inner "$test" >/dev/null 2>&1 ); then
-    echo "  SURVIVED  $test passes without: ${old%%$'\n'*}"; return 1
-  fi
-  echo "  killed    $test fails without: ${old%%$'\n'*}"
+  printf '%s' "${src/"$old"/"$new"}" > "$T/mutant.$n"; chmod +x "$T/mutant.$n"
+  slots_wait mutants_flush
+  set -m
+  (
+    if ( export "$var=$T/mutant.$n"; "$0" --inner "$test" >/dev/null 2>&1 ); then
+      : > "$MUT_DIR/$n.bad"; echo "  SURVIVED  $test passes without: ${old%%$'\n'*}" > "$MUT_DIR/$n.tmp"
+    else
+      echo "  killed    $test fails without: ${old%%$'\n'*}" > "$MUT_DIR/$n.tmp"
+    fi
+    mv "$MUT_DIR/$n.tmp" "$MUT_DIR/$n.out"   # the result appears whole, once
+  ) &
+  set +m
+  mutants_flush
 }
 run_mutants() {
   local rc=0
@@ -1631,6 +1656,7 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_workflow_schedule '  group: publish-base' '  group: prune-base-images' .github/workflows/prune-base-images.yaml || rc=1
   mutate test_prune_workflow_schedule '  cancel-in-progress: false' '  cancel-in-progress: true' .github/workflows/prune-base-images.yaml || rc=1
   mutate test_prune_run 'KEEP_TAGS="${KEEP_TAGS:-5}"' 'KEEP_TAGS="${KEEP_TAGS-5}"' .github/scripts/prune-base-images.sh || rc=1
+  mutants_finish || rc=1
   return $rc
 }
 
@@ -1647,8 +1673,29 @@ if [ ${#tests[@]} -eq 0 ]; then
 fi
 [ ${#tests[@]} -gt 0 ] || { echo "  ERROR     no tests found" >&2; exit 1; }
 failed=0
-for t in "${tests[@]}"; do
-  if ( "$t" ); then echo "  ok        $t"; else echo "  FAILED    $t"; failed=1; fi
-done
+if [ "$TEST_JOBS" = 1 ] || [ ${#tests[@]} -eq 1 ]; then
+  for t in "${tests[@]}"; do
+    if ( "$t" ); then echo "  ok        $t"; else echo "  FAILED    $t"; failed=1; fi
+  done
+else
+  # in parallel: each test writes to a file of its own, shown only when it fails; results come out in the order of the list
+  mkdir -p "$T/base"; BASE_N=0; BASE_NEXT=0
+  base_flush() {
+    while [ "$BASE_NEXT" -lt "$BASE_N" ] && [ -e "$T/base/$BASE_NEXT.rc" ]; do
+      t="${tests[$BASE_NEXT]}"
+      if [ "$(cat "$T/base/$BASE_NEXT.rc")" = 0 ]; then echo "  ok        $t"; else echo "  FAILED    $t"; cat "$T/base/$BASE_NEXT.out"; failed=1; fi
+      BASE_NEXT=$((BASE_NEXT + 1))
+    done
+  }
+  for t in "${tests[@]}"; do
+    slots_wait base_flush
+    n=$BASE_N; BASE_N=$((BASE_N + 1))
+    set -m
+    ( rc=0; ( "$t" ) >"$T/base/$n.out" 2>&1 || rc=$?; echo "$rc" > "$T/base/$n.tmp"; mv "$T/base/$n.tmp" "$T/base/$n.rc" ) &
+    set +m
+    base_flush
+  done
+  wait; base_flush
+fi
 if [ $# -eq 0 ] && [ -z "$NO_MUTANTS" ] && [ "$LAUNCHER" = "$ROOT/agent-pod" ]; then echo "mutants:"; run_mutants || failed=1; fi
 exit $failed

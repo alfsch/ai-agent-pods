@@ -53,7 +53,10 @@ are in `README.md`.
   `kernel.apparmor_restrict_unprivileged_userns=0` for the test (set it back to `1` afterwards).
 - **Before every commit run `tests/check.sh`**: syntax (`bash -n` per file), ShellCheck (`-S warning`, pinned image)
   and the stub tests with their mutants. CI runs the same three steps (`tests/check.sh syntax|shellcheck|tests`), so
-  what passes there passes in CI. `tests/check.sh tests --no-mutants` is the quick form. After a change to the
+  what passes there passes in CI. `tests/check.sh tests --no-mutants` is the quick form.
+  The tests and the mutants run in parallel, `TEST_JOBS` at a time (default: the CPUs, at most 8; `TEST_JOBS=1` is one
+  after the other, as before); the output keeps the order of the list. So tests must not share state: every one works
+  in a temp dir of its own (`setup_case`), and a mutant in a copy of its own (`$T/mutant.<n>`). After a change to the
   sidecar, the image or the installer also run `tests/integration.sh` (needs Docker, see its header).
 
 ## Decisions that look like bugs but are not
