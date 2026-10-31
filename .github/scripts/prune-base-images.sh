@@ -3,7 +3,9 @@
 #
 # A published tag is several package versions, not one: the index (the tag, a 16-hex hash of Dockerfile.base and
 # pod-environment.md), per architecture an image manifest and an attestation manifest (untagged children of the index)
-# and the cosign signature (a version tagged sha256-<hex of the index digest>.sig). A rule such as "delete the untagged
+# and the cosign signature. Cosign 3 stores that as an OCI referrer: a version tagged sha256-<hex of the index digest>
+# (the OCI 1.1 fallback tag, no suffix) that is an index of its own, below which the Sigstore bundle is an untagged
+# manifest. Cosign 2 tagged a single manifest sha256-<hex>.sig; both forms are signatures here. A rule such as "delete the untagged
 # versions" would remove the children of images that are still in use, so whole images are kept or removed:
 #
 #   keep   the KEEP_TAGS newest hash tags (by when the version was last pushed: the later of created_at and updated_at,
@@ -44,8 +46,9 @@ decide() {
     def tags: (.metadata.container.tags // []);
     def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);
     def hashtag: test("^[0-9a-f]{16}$");
-    def sigtag: test("^sha256-[0-9a-f]{64}\\.sig$");
-    def sig_of: "sha256-" + ltrimstr("sha256:") + ".sig";
+    def sigtag: test("^sha256-[0-9a-f]{64}(\\.sig)?$");
+    def sig_of: "sha256-" + ltrimstr("sha256:");
+    def sigkey: sub("\\.sig$"; "");
     if $keep_tags < 1 then error("KEEP_TAGS must be at least 1") else . end
     | (.children // {}) as $ch
     | .versions as $v
@@ -59,8 +62,12 @@ decide() {
     | ([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown
     | if ($unknown | length) > 0 then error("the manifests of a kept index could not be read: " + ($unknown | join(" "))) else . end
     | ($kept | map(.name)) as $kept_names
-    | ([$kept[], $others[]] | map($ch[.name][]?)) as $protected
-    | (([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs
+    | ([$kept[], $others[]] | map($ch[.name][]?)) as $below
+    | (([$kept[], $others[]] | map(.name)) + $below | map(sig_of)) as $kept_sigs
+    | [$v[] | select(tags | any(. as $s | sigtag and ($kept_sigs | any(. == ($s | sigkey)))))] as $kept_sig_versions
+    | ([$kept_sig_versions[] | select($ch[.name] == null) | .name]) as $unknown_sigs
+    | if ($unknown_sigs | length) > 0 then error("the manifests of a kept signature could not be read: " + ($unknown_sigs | join(" "))) else . end
+    | ($below + ($kept_sig_versions | map($ch[.name][]?))) as $protected
     | $v | sort_by(ts) | reverse | .[]
     | . as $x | tags as $t
     | (if ($protected | any(. == $x.name)) then ["keep", "untagged", "part of a kept image"]
@@ -70,7 +77,7 @@ decide() {
           then ["keep", "index", "one of the newest " + ($keep_tags | tostring) + " tags or pushed within " + ($keep_days | tostring) + " days"]
           else ["delete", "index", "older tag beyond the limits"] end)
        elif ($t | any(sigtag)) then
-         (if ($t | any(. as $s | $kept_sigs | any(. == $s)))
+         (if ($t | any(. as $s | $kept_sigs | any(. == ($s | sigkey))))
           then ["keep", "signature", "signature of a kept image"] else ["delete", "signature", "signature of a removed image"] end)
        elif ts >= $grace then ["keep", "untagged", "younger than the grace period"]
        else ["delete", "untagged", "untagged and not part of a kept image"] end)
@@ -97,11 +104,11 @@ descend() {
   for k in $kids; do echo "$k"; descend "$k" || return 1; done
 }
 
-# What is below every tagged image except the signatures: the indexes of the hash tags, and the images somebody tagged
-# otherwise, which are kept whole too (a single manifest has none). One that cannot be read is left out; decide refuses
-# when a kept one is the one that is missing.
+# What is below every tagged version: the indexes of the hash tags, the images somebody tagged otherwise (kept whole too),
+# and the signatures, whose referrers index lists the Sigstore bundle (a single manifest has nothing below it). One that
+# cannot be read is left out; decide refuses when a kept one is the one that is missing.
 echo '{}' > "$tmp/children.json"
-for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)) | .name' "$tmp/versions.json"); do
+for digest in $(jq -r '.[] | select((.metadata.container.tags // []) | length > 0) | .name' "$tmp/versions.json"); do
   if list="$(descend "$digest")"; then
     kids="$(printf '%s\n' "$list" | jq -Rnc '[inputs | select(length > 0)]')"
     jq -c --arg d "$digest" --argjson k "$kids" '. + {($d): $k}' "$tmp/children.json" > "$tmp/children.next" && mv "$tmp/children.next" "$tmp/children.json"
@@ -119,14 +126,14 @@ echo "$doomed of $total versions to delete, $((total - doomed)) kept"
 
 if [ "$DRY_RUN" != false ]; then echo "dry run: nothing deleted"; exit 0; fi
 
-# Indexes first, then signatures, then the untagged manifests: an index that cannot be deleted must not lose what it
-# points at, so a failed index stops the run before its dependencies are touched (the next run tries again).
+# Indexes first, then signatures, then the untagged manifests: an index or a signature that cannot be deleted must not
+# lose what it points at, so a failure stops the run before its dependencies are touched (the next run tries again).
 failed=0
 for kind in index signature untagged; do
   while IFS=$'\t' read -r action id digest k _; do
     [ "$action" = delete ] && [ "$k" = "$kind" ] || continue
     if gh api -X DELETE "$API/versions/$id" >/dev/null; then echo "deleted $id"; else echo "could not delete $id ($digest)" >&2; failed=$((failed + 1)); fi
   done < "$tmp/plan.tsv"
-  if [ "$kind" = index ] && [ "$failed" != 0 ]; then echo "an index could not be deleted: its signature and manifests are left alone" >&2; exit 1; fi
+  if [ "$kind" != untagged ] && [ "$failed" != 0 ]; then echo "an index or signature could not be deleted: what is below it is left alone" >&2; exit 1; fi
 done
 [ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }
