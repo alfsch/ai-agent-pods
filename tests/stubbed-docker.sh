@@ -1150,15 +1150,23 @@ test_publish_signs_created_digest() {   # the workflow signs the digest of the m
 }
 
 # The world of the prune tests: img <n> <age in hours> <child digest numbers>... registers the image with the hash tag
-# H<n> (index digest n; PRUNE_TAG=<tag> gives it that tag instead), its signature version (tag SIG<n>) and the children it lists; untagged <id> <age> adds a
+# H<n> (index digest n; PRUNE_TAG=<tag> gives it that tag instead), its signature (a version tagged SIG<n>, the referrers
+# index, with the Sigstore bundle below it as untagged version 6000+n; PRUNE_LEGACY=1 makes it the single manifest tagged
+# LSIG<n>) and the children it lists; untagged <id> <age> adds a
 # version nobody tags (a child, or an orphan). PRUNE_TOUCH_ID=<id> PRUNE_TOUCH_H=<hours> make that version's updated_at that
 # many hours old while its created_at stays as it is (a tag that was pushed again). Ids of the untagged versions are their digest numbers.
 prune_world() { SPEC=; CH='{}'; NOWV=2000000000; command -v jq >/dev/null 2>&1 || fail "the prune tests need jq"; }
 prune_dg() { printf 'sha256:%064d' "$1"; }
-prune_sig() { printf 'sha256-%064d.sig' "$1"; }
+prune_sig() { printf 'sha256-%064d' "$1"; }          # the tag of the signature of digest n: the OCI referrers fallback tag (cosign 3)
+prune_lsig() { printf 'sha256-%064d.sig' "$1"; }      # the tag cosign 2 used: a single manifest, no referrers index
+prune_ch() { CH="$(jq -c --arg i "$(prune_dg "$1")" --argjson k "$2" '. + {($i): $k}' <<<"$CH")"; }   # prune_ch <digest number> <json array of digests>
 prune_img() {
-  local n="$1" age="$2" k kids='[]'; shift 2
-  SPEC="$SPEC$n $(prune_dg "$n") ${PRUNE_TAG:-H$n} $age"$'\n'"$((100 + n)) $(prune_dg $((5000 + n))) SIG$n $age"$'\n'
+  local n="$1" age="$2" k kids='[]' sg=SIG; shift 2
+  [ -z "${PRUNE_LEGACY:-}" ] || sg=LSIG
+  SPEC="$SPEC$n $(prune_dg "$n") ${PRUNE_TAG:-H$n} $age"$'\n'"$((100 + n)) $(prune_dg $((5000 + n))) $sg$n $age"$'\n'
+  if [ -z "${PRUNE_LEGACY:-}" ]; then
+    SPEC="$SPEC$((6000 + n)) $(prune_dg $((6000 + n))) - $age"$'\n'; prune_ch $((5000 + n)) "[\"$(prune_dg $((6000 + n)))\"]"
+  else prune_ch $((5000 + n)) '[]'; fi
   for k in "$@"; do kids="$(jq -c --arg x "$(prune_dg "$k")" '. + [$x]' <<<"$kids")"; done
   CH="$(jq -c --arg i "$(prune_dg "$n")" --argjson k "$kids" '. + {($i): $k}' <<<"$CH")"
 }
@@ -1171,6 +1179,7 @@ prune_versions() {   # the package versions as the API returns them, from SPEC
     case "$tags" in
       -) tags= ;;
       H[0-9]*) tags="$(printf '%016x' "${tags#H}")" ;;
+      LSIG[0-9]*) tags="$(prune_lsig "${tags#LSIG}")" ;;
       SIG[0-9]*) tags="$(prune_sig "${tags#SIG}")" ;;
     esac
     out="$out$id	$dg	$age	$tags"$'\n'
@@ -1202,24 +1211,34 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
   prune_untagged 6 2; prune_untagged 7 48          # an orphan inside and one outside the grace period
   prune_tagged 108 "$(prune_sig 99)" 100           # the signature of an index that is not there
   prune_decide KEEP_TAGS=2 KEEP_DAYS=30 GRACE_HOURS=24; rc_is 0
-  prune_is keep 1 101 1001 1002 2 102 2001 2002     # the newest two images, whole
-  prune_is delete 3 103 3001 4 104 4001 4002        # the older ones, whole, except what a kept image shares: 2002 above
-  prune_is keep 5 105 5001                          # nobody removes a tag somebody pushed on purpose, nor its signature or children
+  prune_is keep 1 101 6001 1001 1002 2 102 6002 2001 2002   # the newest two images, whole, with the Sigstore bundle below the signature
+  prune_is delete 3 103 6003 3001 4 104 6004 4001 4002      # the older ones, whole, except what a kept image shares: 2002 above
+  prune_is keep 5 105 6005 5001                     # nobody removes a tag somebody pushed on purpose, nor its signature or children
   prune_is keep 6; prune_is delete 7                # the grace period
   prune_is delete 108                               # a signature of an image that is gone
   # B: a tag beyond KEEP_TAGS stays while it is younger than KEEP_DAYS
   prune_world; prune_img 1 24; prune_img 2 120; prune_img 3 960
-  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101 102; prune_is delete 3 103
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101 102 6001 6002; prune_is delete 3 103 6003
   # C: the newest tag stays whatever its age
   prune_world; prune_img 1 2160; prune_img 2 2880
-  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101; prune_is delete 2 102
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101 6001; prune_is delete 2 102 6002
   # H: a tag pushed again is as young as that push, not as old as the version it points at
   prune_world; prune_img 1 24; prune_img 2 2880; prune_img 3 2880
   PRUNE_TOUCH_ID=2 PRUNE_TOUCH_H=48 prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 2 101; prune_is delete 3 103
   # I: an old hash-tagged index that a kept custom-tagged one refers to stays, with what is below it and its signature
   prune_world; prune_img 1 24 1001; prune_img 3 2880 3001; PRUNE_TAG=latest prune_img 5 3000 3 3001
   prune_untagged 1001 24; prune_untagged 3001 2880
-  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 103 3001
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 5 105 3 103 6003 3001
+  # L: a signature stays as long as the version it signs does: an untagged index inside the grace period keeps its signature and bundle, an older one loses them
+  prune_world; prune_img 1 24 1001; prune_untagged 1001 24; PRUNE_TAG=- prune_img 8 2; PRUNE_TAG=- prune_img 9 100
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30 GRACE_HOURS=24; rc_is 0; prune_is keep 1 101 8 108 6008; prune_is delete 9 109 6009
+  # J: the signature of cosign 2 (a single manifest tagged sha256-<hex>.sig) is handled the same way
+  prune_world; PRUNE_LEGACY=1 prune_img 1 24 1001; PRUNE_LEGACY=1 prune_img 2 2160 2001; prune_untagged 1001 24; prune_untagged 2001 2160
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; rc_is 0; prune_is keep 1 101 1001; prune_is delete 2 102 2001
+  # K: the manifests below the signature of a kept image are unknown: nothing is decided, or the bundle would be taken for an orphan
+  prune_world; prune_img 1 24 1001; prune_untagged 1001 24
+  CH="$(jq -c --arg i "$(prune_dg 5001)" 'del(.[$i])' <<<"$CH")"
+  prune_decide KEEP_TAGS=1 KEEP_DAYS=30; [ "$RC" != 0 ] || fail "the manifests of a kept signature were unknown and a plan was made"
   # D: nothing is decided without a hash-tagged version (a listing that failed must not delete the lot)
   prune_world; prune_untagged 7 48; prune_tagged 108 "$(prune_sig 99)" 100
   prune_decide; [ "$RC" != 0 ] || fail "a package without a hash-tagged version was decided on"
@@ -1240,7 +1259,7 @@ test_prune_decide() {   # whole images are kept or removed: the children, the si
 }
 
 test_prune_run() {   # the script lists, decides, and deletes only when DRY_RUN is exactly false
-  local d bin leaf
+  local d bin leaf n
   setup_case; d="$CASE/prune"; bin="$d/bin"; mkdir -p "$bin" "$d/manifests"
   prune_world; prune_img 1 24 1001; prune_img 2 2880 2001; prune_untagged 1001 24; prune_untagged 2001 2880
   PRUNE_TAG=latest prune_img 3 2880 3001; prune_untagged 3001 2880; prune_untagged 3002 2880   # a custom-tagged image with old children, nested: kept whole
@@ -1250,7 +1269,8 @@ test_prune_run() {   # the script lists, decides, and deletes only when DRY_RUN 
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 2001)" > "$d/manifests/$(prune_dg 2)"
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3001)" > "$d/manifests/$(prune_dg 3)"
   printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg 3002)" > "$d/manifests/$(prune_dg 3001)"   # an index below an index
-  for leaf in 1001 2001 3002; do printf '{"schemaVersion":2}' > "$d/manifests/$(prune_dg "$leaf")"; done
+  for n in 1 2 3; do printf '{"manifests":[{"digest":"%s"}]}' "$(prune_dg $((6000 + n)))" > "$d/manifests/$(prune_dg $((5000 + n)))"; done   # the referrers indexes
+  for leaf in 1001 2001 3002 6001 6002 6003; do printf '{"schemaVersion":2}' > "$d/manifests/$(prune_dg "$leaf")"; done
   cat >"$bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "$STUB_DIR/gh.log"
@@ -1282,23 +1302,28 @@ STUB
   pr DRY_RUN=no; rc_is 0; [ "$(deletes)" = 0 ] || fail "DRY_RUN=no deleted"
   # false deletes what the plan says, the old image whole, over the API path of the owner, and nothing else
   pr DRY_RUN=false; rc_is 0
-  [ "$(deletes)" = 3 ] || fail "expected 3 deletions, got $(deletes)"
-  [ "$(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')" = "2 102 2001 " ] || fail "not the index, then its signature, then the manifests: $(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')"
-  for id in 2 102 2001; do grep -q -- "-X DELETE /users/Owner/packages/container/agent-pod-base/versions/$id\$" "$d/gh.log" || fail "version $id was not deleted"; done
-  for id in 3 103 3001 3002; do ! grep -q -- "-X DELETE .*/versions/$id\$" "$d/gh.log" || fail "version $id of the custom-tagged image was deleted"; done
+  [ "$(deletes)" = 4 ] || fail "expected 4 deletions, got $(deletes)"
+  [ "$(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | head -n 2 | tr '\n' ' ')" = "2 102 " ] || fail "not the index, then its signature, then the manifests: $(grep -- '-X DELETE' "$d/gh.log" | sed 's|.*/||' | tr '\n' ' ')"
+  for id in 2 102 2001 6002; do grep -q -- "-X DELETE /users/Owner/packages/container/agent-pod-base/versions/$id\$" "$d/gh.log" || fail "version $id was not deleted"; done
+  for id in 3 103 3001 3002 6003 1 101 1001 6001; do ! grep -q -- "-X DELETE .*/versions/$id\$" "$d/gh.log" || fail "version $id of an image that stays was deleted"; done
   # the manifest list of a kept index cannot be read: nothing is deleted
   pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 1)"; [ "$RC" != 0 ] || fail "a kept index with an unreadable manifest list did not stop the run"
   [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a kept index were unknown"
   # nor when the manifest list of the custom-tagged image cannot be read
   pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3)"; [ "$RC" != 0 ] || fail "a custom-tagged image with an unreadable manifest list did not stop the run"
   [ "$(deletes)" = 0 ] || fail "something was deleted although the children of a custom-tagged image were unknown"
+  # nor when the referrers index of a kept image cannot be read (its bundle would be taken for an orphan)
+  pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 5001)"; [ "$RC" != 0 ] || fail "an unreadable signature of a kept image did not stop the run"
+  [ "$(deletes)" = 0 ] || fail "something was deleted although the signature of a kept image was unknown"
   # nor when something below it cannot be read
   pr DRY_RUN=false STUB_MANIFEST_FAIL="$(prune_dg 3002)"; [ "$RC" != 0 ] || fail "an unreadable manifest below a custom-tagged image did not stop the run"
   [ "$(deletes)" = 0 ] || fail "something was deleted although a manifest below a custom-tagged image was unknown"
   # an index cannot be deleted: its signature and manifests are not touched
   pr DRY_RUN=false STUB_DELETE_FAIL=2; rc_is 1; [ "$(deletes)" = 1 ] || fail "after a failed index deletion $(deletes) deletions were tried, expected only that one"
-  # one deletion fails: the others are still tried, and the run fails
-  pr DRY_RUN=false STUB_DELETE_FAIL=102; rc_is 1; [ "$(deletes)" = 3 ] || fail "a failed deletion stopped the others"
+  # a signature cannot be deleted: the bundle below it is not touched either
+  pr DRY_RUN=false STUB_DELETE_FAIL=102; rc_is 1; [ "$(deletes)" = 2 ] || fail "after a failed signature deletion $(deletes) deletions were tried, expected the index and that one"
+  # one deletion of an untagged manifest fails: the others are still tried, and the run fails
+  pr DRY_RUN=false STUB_DELETE_FAIL=2001; rc_is 1; [ "$(deletes)" = 4 ] || fail "a failed deletion stopped the others"
 }
 
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
@@ -1538,7 +1563,7 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_publish_signs_created_digest "digest=\"sha256:\$(printf '%s' \"\$manifest\"" "digest=\"sha256:\$(printf '%s' \"\$sources\"" .github/workflows/publish-base.yaml || rc=1
   mutate test_publish_signs_created_digest '          docker buildx imagetools inspect "$IMAGE@$digest"' '          true' .github/workflows/publish-base.yaml || rc=1
   mutate test_publish_signs_created_digest '          echo "digest=$digest" >> "$GITHUB_OUTPUT"' '          true' .github/workflows/publish-base.yaml || rc=1
-  mutate test_prune_decide '([$kept[], $others[]] | map($ch[.name][]?)) as $protected' '[] as $protected' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '([$kept[], $others[]] | map($ch[.name][]?)) as $below' '[] as $below' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide 'elif ts >= $grace then ["keep", "untagged", "younger than the grace period"]' 'elif false then ["keep", "untagged", "younger than the grace period"]' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide 'map(select(.key < $keep_tags or (.value | ts) >= $cutoff))' 'map(select(.key < $keep_tags))' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide 'map(select(.key < $keep_tags or (.value | ts) >= $cutoff))' 'map(select((.value | ts) >= $cutoff))' .github/scripts/prune-base-images.sh || rc=1
@@ -1553,16 +1578,22 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_prune_run '[ "$failed" = 0 ] || { echo "$failed deletions failed" >&2; exit 1; }' '[ "$failed" = 0 ] || true' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "tr '[:upper:]' '[:lower:]'" 'cat' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run "jq -s 'add // []'" "jq -s '.[0] // []'" .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '($kept | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_decide '(([$kept[], $others[]] | map(.name)) + $protected | map(sig_of)) as $kept_sigs' '([$kept[], $others[]] | map(.name | sig_of)) as $kept_sigs' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + $below + $young) as $retained' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + ($others | map(.name)) + $below) as $retained' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '($kept_names + ($others | map(.name)) + $below + $young) as $retained' '($kept_names + ($others | map(.name)) + $young) as $retained' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '([$kept[], $others[]] | map(select($ch[.name] == null) | .name)) as $unknown' '($kept | map(select($ch[.name] == null) | .name)) as $unknown' .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_run 'length > 0 and any(test("^sha256-[0-9a-f]{64}\\.sig$") | not)' 'any(test("^[0-9a-f]{16}$"))' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run "select((.metadata.container.tags // []) | length > 0)" 'select((.metadata.container.tags // []) | any(test("^[0-9a-f]{16}$")))' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide '    def ts: ([.created_at, (.updated_at // .created_at)] | map(fromdateiso8601) | max);' '    def ts: (.created_at | fromdateiso8601);' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; done' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run '  for k in $kids; do echo "$k"; descend "$k" || return 1; done' '  for k in $kids; do echo "$k"; descend "$k" || true; done' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_decide 'if ($protected | any(. == $x.name)) then ["keep", "untagged", "part of a kept image"]' 'if false then ["keep", "untagged", "part of a kept image"]' .github/scripts/prune-base-images.sh || rc=1
   mutate test_prune_run 'for kind in index signature untagged; do' 'for kind in untagged signature index; do' .github/scripts/prune-base-images.sh || rc=1
-  mutate test_prune_run 'if [ "$kind" = index ] && [ "$failed" != 0 ]; then' 'if false; then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'if [ "$kind" != untagged ] && [ "$failed" != 0 ]; then' 'if false; then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_run 'if [ "$kind" != untagged ] && [ "$failed" != 0 ]; then' 'if [ "$kind" = index ] && [ "$failed" != 0 ]; then' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'def sigtag: test("^sha256-[0-9a-f]{64}(\\.sig)?$");' 'def sigtag: test("^sha256-[0-9a-f]{64}\\.sig$");' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide 'def sigtag: test("^sha256-[0-9a-f]{64}(\\.sig)?$");' 'def sigtag: test("^sha256-[0-9a-f]{64}$");' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '| ($below + ($kept_sig_versions | map($ch[.name][]?))) as $protected' '| $below as $protected' .github/scripts/prune-base-images.sh || rc=1
+  mutate test_prune_decide '| if ($unknown_sigs | length) > 0 then' '| if false then' .github/scripts/prune-base-images.sh || rc=1
   return $rc
 }
 

@@ -95,7 +95,9 @@ test that fails without it.
   sign that with its own identity.
 - `prune-base-images.yaml` (script `.github/scripts/prune-base-images.sh`) removes old versions of the published base,
   which `publish-base.yaml` only adds to. It keeps and removes **whole images**: a tag is the index, its per-architecture
-  children (read from the index) and its cosign signature, so a rule such as "delete the untagged versions" would break
+  children (read from the index) and its cosign signature (cosign 3 stores it as an OCI referrer: a version tagged
+  `sha256-<hex of the index digest>`, no `.sig`, an index with the Sigstore bundle below it; cosign 2 tagged a single
+  manifest `….sig`; both are handled), so a rule such as "delete the untagged versions" would break
   the tags that are still in use. Kept: the `KEEP_TAGS` newest hash tags (default 5, at least 1, so the newest stays
   whatever its age), every tag pushed within `KEEP_DAYS` days (default 30), tags the workflow does not make, and untagged
   versions younger than `GRACE_HOURS` (default 24, a publish may still be running). It decides nothing when no hash-tagged
