@@ -316,7 +316,7 @@ test_plain_exec() {   # without DOCKER=1 the launcher only execs docker run (inv
 test_pod_environment_docker() {   # the agent is told how to tell a DOCKER=1 session (sidecar daemon) from one without a daemon
   local w; w="$(grep -n 'docker. is a client' "$PODENV" | cut -d: -f1)"; [ -n "$w" ] || fail "the docker bullet is not in $PODENV"
   local b; b="$(sed -n "${w},/^- .gh. is authenticated/p" "$PODENV")"
-  for need in 'If `DOCKER_HOST` is set' 'tcp://dind:2376' '`docker info` confirms it' 'not the host' '/var/run/docker.sock' 'If `DOCKER_HOST` is unset there is no daemon' 'restart the'; do
+  for need in 'If `DOCKER_HOST` is set' 'tcp://dind:2376' '`docker info` confirms it' 'not the host' '/var/run/docker.sock' 'If `DOCKER_HOST` is unset there is no daemon' 'restart the' 'pinned image when one exists' 'never installed or downloaded into the pod' '-v "$PWD:$PWD"' 'the same path'; do
     [[ "$b" == *"$need"* ]] || fail "the docker bullet of $PODENV does not say: $need"
   done
 }
@@ -1671,6 +1671,8 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_pod_environment_docker 'If `DOCKER_HOST` is unset there is no daemon' 'There may be no daemon' pod-environment.md || rc=1
   mutate test_pod_environment_docker 'That daemon is not the host'"'"'s' 'That daemon may be the host'"'"'s' pod-environment.md || rc=1
   mutate test_pod_environment_docker '`docker info` confirms it' 'it works' pod-environment.md || rc=1
+  mutate test_pod_environment_docker 'pinned image when one exists, never installed or downloaded into the pod' 'pinned image when one exists' pod-environment.md || rc=1
+  mutate test_pod_environment_docker 'the same path and what they create there is yours' 'a path and what they create there is yours' pod-environment.md || rc=1
   mutants_finish || rc=1
   return $rc
 }
