@@ -8,8 +8,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 FILES=(agent-pod install.sh uninstall.sh tests/check.sh tests/stubbed-docker.sh tests/integration.sh tests/published-base-tag.sh .github/scripts/prune-base-images.sh)
-# Pinned, so that a new ShellCheck version cannot fail a pull request on its own.
-SHELLCHECK_IMAGE=koalaman/shellcheck:v0.10.0
+# Pinned by tag and digest, so that a new ShellCheck version cannot fail a pull request on its own: Renovate bumps both
+# (renovate.json) and the checks of its pull request show what the new version finds.
+SHELLCHECK_IMAGE=koalaman/shellcheck:v0.11.0@sha256:61862eba1fcf09a484ebcc6feea46f1782532571a34ed51fedf90dd25f925a8d
 
 # One `bash -n` per file: with several names it parses only the first and takes the rest as arguments.
 # $BASH is the shell running this script, so `/bin/bash tests/check.sh syntax` checks with the macOS Bash 3.2.

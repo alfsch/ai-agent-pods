@@ -4,6 +4,15 @@
     "config:recommended"
   ],
   "forkProcessing": "enabled",
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/examples/**",
+    "**/__tests__/**",
+    "**/test/**",
+    "**/__fixtures__/**"
+  ],
   "minimumReleaseAgeBehaviour": "timestamp-required",
   "minimumReleaseAge": "3 days",
   "customManagers": [
@@ -44,6 +53,18 @@
       ],
       "datasourceTemplate": "docker",
       "versioningTemplate": "docker"
+    },
+    {
+      "description": "Keep the digest-pinned ShellCheck image that tests/check.sh runs current",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^tests\\/check\\.sh$/"
+      ],
+      "matchStrings": [
+        "SHELLCHECK_IMAGE=(?<depName>koalaman/shellcheck):(?<currentValue>v[\\w.-]+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "semver-coerced"
     }
   ],
   "packageRules": [
@@ -94,6 +115,16 @@
       "description": "Pin the digest of the cosign image that verifies the base signature",
       "matchDepNames": [
         "ghcr.io/sigstore/cosign/cosign"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "pinDigests": true
+    },
+    {
+      "description": "Pin the digest of the ShellCheck image; Renovate updates tag and digest together",
+      "matchDepNames": [
+        "koalaman/shellcheck"
       ],
       "matchDatasources": [
         "docker"
