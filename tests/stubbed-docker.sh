@@ -17,6 +17,8 @@ PUBTAG="${PUBTAG:-$ROOT/tests/published-base-tag.sh}"   # picks the published ba
 INSTALLER="${INSTALLER:-$ROOT/install.sh}"   # the installer whose --build-hash is tested
 WORKFLOW="${WORKFLOW:-$ROOT/.github/workflows/publish-base.yaml}"   # the publish workflow whose create and sign steps are run in test_publish_signs_created_digest
 PRUNE="${PRUNE:-$ROOT/.github/scripts/prune-base-images.sh}"   # the script that prune-base-images.yaml runs
+RENOVATEJSON="${RENOVATEJSON:-$ROOT/renovate.json}"   # the Renovate config and the script whose ShellCheck pin it must see (test_renovate_shellcheck)
+CHECKSH="${CHECKSH:-$ROOT/tests/check.sh}"
 PODENV="${PODENV:-$ROOT/pod-environment.md}"   # what the agent is told about its container, checked in test_pod_environment_docker
 PRUNEWF="${PRUNEWF:-$ROOT/.github/workflows/prune-base-images.yaml}"   # that workflow, whose schedule is checked in test_prune_workflow_schedule
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
@@ -1362,6 +1364,22 @@ test_prune_workflow_schedule() {   # the prune runs daily and really deletes the
   ! grep -q 'cancel-in-progress: true' "$PRUNEWF" || fail "a running prune is cancelled, not finished"
 }
 
+test_renovate_shellcheck() {   # Renovate can see the pinned ShellCheck image: tests/ is not ignored, and a manager matches the pin
+  local pat re out
+  command -v jq >/dev/null 2>&1 && command -v perl >/dev/null 2>&1 || fail "this test needs jq and perl"
+  # config:recommended ignores **/tests/**, where check.sh lives: without this override Renovate never reads the file
+  jq -e '.ignorePaths | type == "array" and (index("**/tests/**") | not)' "$RENOVATEJSON" >/dev/null \
+    || fail "renovate.json does not take **/tests/** out of ignorePaths: tests/check.sh is never looked at"
+  pat="$(jq -r '[.customManagers[] | select(.matchStrings[0] | contains("SHELLCHECK_IMAGE"))][0].managerFilePatterns[0] // empty' "$RENOVATEJSON")"
+  re="$(jq -r '[.customManagers[] | select(.matchStrings[0] | contains("SHELLCHECK_IMAGE"))][0].matchStrings[0] // empty' "$RENOVATEJSON")"
+  [ -n "$pat" ] && [ -n "$re" ] || fail "renovate.json has no custom manager for SHELLCHECK_IMAGE"
+  pat="${pat#/}"; pat="${pat%/}"
+  perl -e 'exit($ARGV[0] =~ m{$ARGV[1]} ? 0 : 1)' tests/check.sh "$pat" || fail "the manager's file pattern '$pat' does not match tests/check.sh"
+  # the regex, as Renovate applies it, finds the image, a tag and a digest in the line that check.sh runs (no version is named here)
+  out="$(perl -ne 'BEGIN { $re = shift } print "$+{depName} $+{currentValue} $+{currentDigest}\n" if /$re/' "$re" "$CHECKSH")"
+  [[ "$out" =~ ^koalaman/shellcheck\ v[0-9.]+\ sha256:[0-9a-f]{64}$ ]] || fail "the manager does not find a digest-pinned koalaman/shellcheck tag in tests/check.sh (got: '$out')"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 # Jobs: the tests and the mutants run TEST_JOBS at a time (default: the CPUs, at most 8; 1 is one after the other). Their
 # output is printed in the order they were started, as they finish. No `wait -n` (Bash 3.2), so a slot is found by polling.
@@ -1380,7 +1398,7 @@ mutants_flush() {   # prints the results that are done, in order, up to the firs
 mutants_finish() { wait; mutants_flush; ! ls "$MUT_DIR"/*.bad >/dev/null 2>&1; }   # fails when a mutant survived
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER n; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; pod-environment.md) var=PODENV ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; pod-environment.md) var=PODENV ;; renovate.json) var=RENOVATEJSON ;; tests/check.sh) var=CHECKSH ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   MUT_N=$((MUT_N + 1)); n=$MUT_N
@@ -1673,6 +1691,11 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_pod_environment_docker '`docker info` confirms it' 'it works' pod-environment.md || rc=1
   mutate test_pod_environment_docker 'pinned image when one exists, never installed or downloaded into the pod' 'pinned image when one exists' pod-environment.md || rc=1
   mutate test_pod_environment_docker 'the same path and what they create there is yours' 'a path and what they create there is yours' pod-environment.md || rc=1
+  mutate test_renovate_shellcheck '"**/test/**",' '"**/test/**", "**/tests/**",' renovate.json || rc=1
+  mutate test_renovate_shellcheck '"/^tests\\/check\\.sh$/"' '"/^tests\\/other\\.sh$/"' renovate.json || rc=1
+  mutate test_renovate_shellcheck 'SHELLCHECK_IMAGE=(?<depName>koalaman/shellcheck):' 'SHELLCHECK_IMG=(?<depName>koalaman/shellcheck):' renovate.json || rc=1
+  mutate test_renovate_shellcheck 'SHELLCHECK_IMAGE=koalaman/shellcheck:' 'SHELLCHECK_IMAGE=koalaman/shellcheck-alpine:' tests/check.sh || rc=1
+  mutate test_renovate_shellcheck '@sha256:' '#sha256:' tests/check.sh || rc=1
   mutants_finish || rc=1
   return $rc
 }
