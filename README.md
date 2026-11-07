@@ -17,7 +17,8 @@
 It is not full isolation:
 
 - ✅ **Outside the launch folder is unreachable.** `~/.ssh`, `~/.aws`, other projects and the host shell are not mounted.
-- ⚠️ **Inside the launch folder is fully exposed.** Any `.env`, `.git/config` or keys in it are readable and writable, outbound network is open, and the agent's login is stored on the host (`~/.claude-pod/`, `~/.copilot-pod/`).
+- ⚠️ **Inside the launch folder is fully exposed.** Any `.env`, `.git/config` or keys in it are readable and writable, and the agent's login is stored on the host (`~/.claude-pod/`, `~/.copilot-pod/`).
+- 🌐 **The network is open, so what the agent can read can be sent anywhere.** The container hides your files from the agent, not from a connection out. There is no egress allowlist yet (proposed in [#41](https://github.com/alfsch/ai-agent-pods/issues/41)); `NET=none` cuts the network, and the agent with it.
 - 🚫 **Don't launch from `~` or `/` or other sensitive folders.** That mounts your whole home or filesystem and defeats the point.
 
 ```sh
@@ -193,7 +194,7 @@ The container runs as your uid:gid with `--cap-drop=ALL`, `no-new-privileges` an
 
 **Still exposed:**
 - **The project folder itself**: `.env`, `.git/config` (may carry credentials for private remotes), keys committed by mistake, `node_modules`, sibling worktrees. Don't run it in a folder whose contents you would not trust the AI, or a malicious dependency it installed, to see and modify.
-- **The network**: outbound is open by default, so contents can be exfiltrated and API quota burned. `NET=none` cuts it, and the agent itself with it; there is no egress allowlist.
+- **The network**: outbound is open by default, so anything the agent, or a dependency it installed, can read (project files, `.env`, the agent's login) can be sent to any host, and API quota can be burned. `NET=none` cuts it, and the agent itself with it, and excludes `PORTS` and `DOCKER=1`. There is no egress allowlist yet; it is proposed in [#41](https://github.com/alfsch/ai-agent-pods/issues/41). Until then keep secrets out of the project folder, and use `NET=none` for work that does not need the agent's API.
 - **The agent's login**, stored in `~/.claude-pod/`, `~/.copilot-pod/` or `~/.goose-pod/` (separate from any host install, shared across projects).
 - **Shared state links your projects.** The state dirs and the config file are the same for every project, and the pod can write to them. Code running in project A (a prompt-injected agent, a malicious dependency) can leave a hook, a command, an MCP server entry or instructions there, and the agent runs it in your next session in project B, with B mounted. So "other projects are unreachable" holds for files, not for the agent's own settings. If you work with untrusted code, give it its own copy of the state: run it with another `HOME` (`HOME=~/untrusted agent-pod claude ...` uses `~/untrusted/.claude-pod` and `~/untrusted/.config/agent-pod`), and delete that directory afterwards.
 
