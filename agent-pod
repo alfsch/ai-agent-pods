@@ -269,6 +269,102 @@ if [ -n "$_g" ]; then
   GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
 fi
 
+# Git credentials: a file of HTTPS git credentials, mounted read-only as /run/agent-pod/git-credentials.
+# AGENT_POD_GIT_CREDENTIALS names one explicitly and must exist (a typo must not silently use another token);
+# else <agent>-<profile>.credentials (with AGENT_POD_PROFILE), else <agent>.credentials, else credentials in the config dir;
+# none of them: no mount. The file must not be in a directory the pod can write (the project, the state dir, the
+# dirs mounted from the config dir), and the pod cannot change it. The path is made absolute (Docker takes a
+# relative source for a volume name). Every non-comment line must be https://<user>:<token>@<host>[:port][/org[/repo]]
+# with %XX escapes decoded; user and token must not be empty, path must not end in .git or / or contain //,
+# host+path must be unique, and a % must be followed by two hex digits. The helper git-credential-agent-pod
+# reads from it. Whatever it holds is visible to the pod: keep it to the credentials.
+CRED_FILE=
+CRED_MOUNT=()
+if [ -n "${AGENT_POD_GIT_CREDENTIALS:-}" ]; then
+  [ -f "$AGENT_POD_GIT_CREDENTIALS" ] || die "AGENT_POD_GIT_CREDENTIALS=$AGENT_POD_GIT_CREDENTIALS is not a file."
+  CRED_FILE="$AGENT_POD_GIT_CREDENTIALS"
+elif [ -f "$A_CFG_HOME/$A_KEY.credentials" ]; then CRED_FILE="$A_CFG_HOME/$A_KEY.credentials"
+elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT.credentials"
+elif [ -f "$A_CFG_HOME/credentials" ]; then CRED_FILE="$A_CFG_HOME/credentials"
+fi
+if [ -n "$CRED_FILE" ]; then
+  # Validate the file
+  _cred_dir="$(cd "$(dirname "$CRED_FILE")" && pwd -P)" || die "Cannot use $CRED_FILE."
+  _cred_file="$_cred_dir/$(basename "$CRED_FILE")"
+  refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"
+  
+  # Validate each non-comment, non-blank line using awk for portability
+  # awk prints validation errors to stdout (to be captured) and scopes to stdout on success
+  _validation_output=$(awk '
+BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
+/^[[:space:]]*#|^[[:space:]]*$/ { next }
+{
+  line_num++
+  if (substr($0, 1, 8) != "https://") { print "line " line_num ": scheme must be https://"; exit 1 }
+  rest = substr($0, 9)
+  at_pos = index(rest, "@")
+  if (at_pos == 0) { print "line " line_num ": missing @"; exit 1 }
+  creds = substr(rest, 1, at_pos - 1)
+  hostpath = substr(rest, at_pos + 1)
+  colon_pos = index(creds, ":")
+  if (colon_pos == 0) { print "line " line_num ": user or token missing"; exit 1 }
+  user = substr(creds, 1, colon_pos - 1)
+  token = substr(creds, colon_pos + 1)
+  if (user == "" || token == "") { print "line " line_num ": user or token missing"; exit 1 }
+  if (index(user, "%") > 0 || index(token, "%") > 0) {
+    s = user token
+    pos = 1
+    while (pos <= length(s)) {
+      if (substr(s, pos, 1) == "%") {
+        if (pos + 2 > length(s)) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
+        hex = substr(s, pos + 1, 2)
+        if (hex !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
+        pos = pos + 3
+      } else {
+        pos = pos + 1
+      }
+    }
+  }
+  slash_pos = index(hostpath, "/")
+  if (slash_pos == 0) {
+    host = hostpath
+    path = ""
+  } else {
+    host = substr(hostpath, 1, slash_pos - 1)
+    path = substr(hostpath, slash_pos + 1)
+  }
+  if (path != "" && substr(path, length(path) - 3) == ".git") { print "line " line_num ": path must not end in .git"; exit 1 }
+  if (path != "" && substr(path, length(path)) == "/") { print "line " line_num ": path must not end in /"; exit 1 }
+  if (index(path, "//") > 0) { print "line " line_num ": path must not contain //"; exit 1 }
+  key = host ":" path
+  if (index(" " seen " ", " " key " ") > 0) { print "line " line_num ": duplicate host+path"; exit 1 }
+  seen = seen " " key
+  
+  # Build scope string: host[:port][/path]
+  if (!first_scope) printf ", ";
+  printf "%s", host;
+  if (path != "") printf "/%s", path;
+  first_scope = 0
+}
+END {
+  if (!first_scope) printf "\n"
+}
+' "$CRED_FILE") || _validation_rc=$?
+  if [ -z "${_validation_rc:-}" ]; then _validation_rc=0; fi
+  if [ $_validation_rc -ne 0 ]; then
+    _validation_error="$_validation_output"
+    die "AGENT_POD_GIT_CREDENTIALS: $_validation_error"
+  fi
+  _scopes="$_validation_output"
+  
+  CRED_FILE="$_cred_dir/$(basename "$CRED_FILE")"
+  CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")
+  # Print scopes on stderr
+  if [ -n "$_scopes" ]; then
+    printf 'Git credentials: %s (%s)\n' "$CRED_FILE" "$_scopes" >&2
+  fi
+fi
+
 # AGENT_POD_SKILLS_DIR: a host folder of skills (<name>/SKILL.md), mounted read-only, one mount per skill so that the
 # agent's own skills in the same dir (Claude Code's synced/ among them) stay visible and the pod cannot change the host
 # copy. Docker leaves an empty <name> dir in the state dir as the mount point. A skill of the same name there is shadowed.
@@ -619,6 +715,10 @@ AGENT_ENV=()
 [ -z "$A_NOUPDATE" ] || AGENT_ENV+=(-e "$A_NOUPDATE")
 { [ "${POD_USER%%:*}" != 0 ] || [ -z "$A_ROOT_ENV" ]; } || AGENT_ENV+=(-e "$A_ROOT_ENV")
 for _v in $A_ENV $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
+# Add git credentials environment variables if CRED_FILE is set
+if [ -n "$CRED_FILE" ]; then
+  AGENT_ENV+=(-e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=credential.helper -e GIT_CONFIG_VALUE_0=/usr/local/bin/git-credential-agent-pod -e GIT_CONFIG_KEY_1=credential.useHttpPath -e GIT_CONFIG_VALUE_1=true)
+fi
 RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${DOCKER:+--name "$POD_NAME"} \
   ${DOCKER:+--init} \
@@ -635,6 +735,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
+  ${CRED_MOUNT[@]+"${CRED_MOUNT[@]}"} \
   ${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"} \
   "$IMAGE" "$@")
 

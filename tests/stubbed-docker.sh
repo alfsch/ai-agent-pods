@@ -1267,6 +1267,175 @@ test_git_credential_helper() {   # the git-credential-agent-pod helper in the ba
   grep '^username=user$' "$CASE/out" || fail "expected match with blank line ending input"
 }
 
+test_git_credentials() {   # git credentials file lookup and validation in the launcher
+  local C P
+  # the launcher mounts the physical path (macOS: /var is /private/var), so the expectations use it too
+  gc() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; P="$(cd "$CASE" && pwd -P)"; }
+  
+  # none: no mount at all
+  gc; launch -- true; rc_is 0; not_logged 'git-credentials'
+  
+  # lookup order: explicit wins
+  gc; echo 'https://u:S3CRET-TOKEN-0001@github.com' > "$CASE/explicit"; launch AGENT_POD_GIT_CREDENTIALS="$CASE/explicit" -- true; rc_is 0
+  logged " -v $(cd "$CASE" && pwd -P)/explicit:/run/agent-pod/git-credentials:ro "
+  
+  # lookup order: <agent>-<profile>.credentials with AGENT_POD_PROFILE
+  gc; echo 'https://u:S3CRET-TOKEN-0002@github.com' > "$C/${AGENT:-claude}-test.credentials"
+  launch AGENT_POD_PROFILE=test -- true; rc_is 0
+  logged " -v $C/${AGENT:-claude}-test.credentials:/run/agent-pod/git-credentials:ro "; not_logged "$C/${AGENT:-claude}.credentials"
+  
+  # lookup order: <agent>.credentials
+  gc; echo 'https://u:S3CRET-TOKEN-0003@github.com' > "$C/${AGENT:-claude}.credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/${AGENT:-claude}.credentials:/run/agent-pod/git-credentials:ro "; not_logged "$C/credentials"
+  
+  # lookup order: credentials (fallback)
+  gc; echo 'https://u:S3CRET-TOKEN-0004@github.com' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
+  # another agent's file is not used
+  gc; echo 'https://u:S3CRET-TOKEN-0005@github.com' > "$C/other.credentials"
+  launch -- true; rc_is 0; not_logged "$C/other.credentials"; not_logged 'git-credentials'
+  
+  # explicit missing file stops the launcher and nothing is started
+  gc; launch AGENT_POD_GIT_CREDENTIALS="$CASE/missing" -- true; [ "$RC" != 0 ] || fail "a missing AGENT_POD_GIT_CREDENTIALS was accepted"
+  in_out 'AGENT_POD_GIT_CREDENTIALS='; not_logged '^run '
+  
+  # validation: scheme is not https://
+  gc; printf 'http://u:S3CRET-TOKEN-0006@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "http scheme was accepted"
+  in_out 'line 1.*https'; not_in_out 'S3CRET-TOKEN-0006'; not_logged '^run '
+  
+  # validation: user is missing
+  gc; printf 'https://:S3CRET-TOKEN-0007@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "missing user was accepted"
+  in_out 'line 1.*user'; not_in_out 'S3CRET-TOKEN-0007'; not_logged '^run '
+  
+  # validation: token is missing
+  gc; printf 'https://u:@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "missing token was accepted"
+  in_out 'line 1.*token'; not_in_out 'S3CRET-TOKEN'; not_logged '^run '
+  
+  # validation: path ends in .git
+  gc; printf 'https://u:S3CRET-TOKEN-0008@github.com/org/repo.git\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "path ending in .git was accepted"
+  in_out 'line 1.*\.git'; not_in_out 'S3CRET-TOKEN-0008'; not_logged '^run '
+  
+  # validation: path ends in /
+  gc; printf 'https://u:S3CRET-TOKEN-0009@github.com/org/repo/\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "path ending in / was accepted"
+  in_out 'line 1.*/'; not_in_out 'S3CRET-TOKEN-0009'; not_logged '^run '
+  
+  # validation: path contains //
+  gc; printf 'https://u:S3CRET-TOKEN-0010@github.com/org//repo\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "path with // was accepted"
+  in_out 'line 1.*//'; not_in_out 'S3CRET-TOKEN-0010'; not_logged '^run '
+  
+  # validation: same host plus path appears twice
+  gc; printf 'https://u:S3CRET-TOKEN-0011@github.com/org/repo\nhttps://u2:S3CRET-TOKEN-0012@github.com/org/repo\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "duplicate host+path was accepted"
+  in_out 'line 2.*duplicate'; not_in_out 'S3CRET-TOKEN'; not_logged '^run '
+  
+  # validation: % not followed by two hex digits
+  gc; printf 'https://u:S3CRET-TOKEN-0013%%@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "lone % was accepted"
+  in_out 'line 1.*%'; not_in_out 'S3CRET-TOKEN-0013'; not_logged '^run '
+  
+  # valid file passes
+  gc; printf 'https://u:S3CRET-TOKEN-0014@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=2'
+  
+  # validation: % not followed by two hex digits
+  gc; printf 'https://u:S3CRET-TOKEN-0015%%@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "lone % was accepted"
+  in_out 'line 1.*%'; not_in_out 'S3CRET-TOKEN-0015'; not_logged '^run '
+  
+  # validation: % followed by non-hex digits
+  gc; printf 'https://u:S3CRET-TOKEN-0016%%zz@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "% followed by non-hex was accepted"
+  in_out 'line 1.*%'; not_in_out 'S3CRET-TOKEN-0016'; not_logged '^run '
+  
+  # validation: % followed by two hex digits is valid
+  gc; printf 'https://u:S3CRET-TOKEN-0017%%41@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=2'
+  
+  # scopes message: host-only line, org line, repo line, one with port, and indented comment
+  gc; printf 'https://u:S3CRET-TOKEN-0018@github.com\nhttps://u:S3CRET-TOKEN-0019@github.com/example-org\nhttps://u:S3CRET-TOKEN-0020@github.com/example-org/webapp\nhttps://u:S3CRET-TOKEN-0021@ghes.example.com:8443/team\n  # indented comment\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  in_out 'Git credentials:.*github.com, github.com/example-org, github.com/example-org/webapp, ghes.example.com:8443/team'
+  not_in_out 'S3CRET-TOKEN'
+  
+  # scopes message: token must never appear in output
+  gc; printf 'https://user-with-token:S3CRET-TOKEN-0022@gitlab.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  in_out 'Git credentials:.*gitlab.com'
+  not_in_out 'S3CRET-TOKEN-0022'
+  not_in_out 'user-with-token'
+  
+  # Step E: guard refuses writable paths with correct label
+  gc; printf 'https://u:S3CRET-TOKEN-0023@github.com\n' > "$CASE/my proj/credentials"
+  launch AGENT_POD_GIT_CREDENTIALS="$CASE/my proj/credentials" -- true; [ "$RC" != 0 ] || fail "writable credentials file was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+  
+  # Step E: guard refuses agent state dir
+  gc; mkdir -p "$H/.claude-pod"; printf 'https://u:S3CRET-TOKEN-0024@github.com\n' > "$H/.claude-pod/credentials"
+  launch AGENT_POD_GIT_CREDENTIALS="$H/.claude-pod/credentials" -- true; [ "$RC" != 0 ] || fail "writable credentials file in state dir was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+  
+  # Step E: guard refuses mounted config dir (skills)
+  gc; mkdir -p "$C/${AGENT:-claude}-skills"; printf 'https://u:S3CRET-TOKEN-0025@github.com\n' > "$C/${AGENT:-claude}-skills/credentials"
+  launch AGENT_POD_GIT_CREDENTIALS="$C/${AGENT:-claude}-skills/credentials" -- true; [ "$RC" != 0 ] || fail "writable credentials file in mounted config dir was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+  
+  # Step E: mount is read-only at /run/agent-pod/git-credentials with absolute path
+  gc; printf 'https://u:S3CRET-TOKEN-0026@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
+  # Step E: GIT_CONFIG_* variables have exact values
+  gc; printf 'https://u:S3CRET-TOKEN-0027@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged 'GIT_CONFIG_COUNT=2(\s|$)'
+  logged 'GIT_CONFIG_KEY_0=credential\.helper(\s|$)'
+  logged 'GIT_CONFIG_VALUE_0=/usr/local/bin/git-credential-agent-pod(\s|$)'
+  logged 'GIT_CONFIG_KEY_1=credential\.useHttpPath(\s|$)'
+  logged 'GIT_CONFIG_VALUE_1=true(\s|$)'
+  
+  # Step E: token never appears in docker run arguments
+  gc; printf 'https://u:S3CRET-TOKEN-0028@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  not_logged 'S3CRET-TOKEN-0028'
+  
+  # Step E: without a file, no mount and no GIT_CONFIG_*
+  gc; launch -- true; rc_is 0
+  not_logged 'git-credentials'
+  not_logged 'GIT_CONFIG_COUNT'
+  
+  # awk exit status: non-zero exit with no message is an error
+  # Save original awk and create a fake one that exits 2
+  gc; printf 'https://u:S3CRET-TOKEN-0029@github.com\n' > "$C/credentials"
+  FAKE_AWK_DIR="$CASE/fake-awk"
+  mkdir -p "$FAKE_AWK_DIR"
+  cat > "$FAKE_AWK_DIR/awk" << 'FAKE_AWK'
+#!/bin/sh
+exit 2
+FAKE_AWK
+  chmod +x "$FAKE_AWK_DIR/awk"
+  OLD_PATH="$PATH"
+  export PATH="$FAKE_AWK_DIR:$PATH"
+  launch -- true; [ "$RC" != 0 ] || fail "awk exit 2 was accepted"
+  export PATH="$OLD_PATH"
+  in_out 'AGENT_POD_GIT_CREDENTIALS'
+  not_logged '^run '
+
+}
+
 test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helper per call
   local script wrapper helper fixture fake_gh
   script="$(sed -n '/^RUN cat > \/usr\/local\/bin\/gh /,/^GH_WRAPPER_EOF$/p' "$DOCKERFILE_BASE" | sed '1d;$d')"
@@ -1790,6 +1959,38 @@ run_mutants() {
   mutate test_gh_wrapper 'github.com|*.ghe.com)' 'github.com)' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'GH_ENTERPRISE_TOKEN="$_password" exec' 'GH_TOKEN="$_password" exec' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'if ! command -v git-credential-agent-pod >/dev/null 2>&1; then' 'if false; then' Dockerfile.base || rc=1
+  mutate test_git_credentials 'if [ -n "${AGENT_POD_GIT_CREDENTIALS:-}" ]; then' 'if false; then' agent-pod || rc=1
+  mutate test_git_credentials 'elif [ -f "$A_CFG_HOME/$A_KEY.credentials" ]; then CRED_FILE="$A_CFG_HOME/$A_KEY.credentials"' 'elif false; then' agent-pod || rc=1
+  mutate test_git_credentials 'elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT.credentials"' 'elif false; then' agent-pod || rc=1
+  mutate test_git_credentials 'elif [ -f "$A_CFG_HOME/credentials" ]; then CRED_FILE="$A_CFG_HOME/credentials"' 'elif false; then' agent-pod || rc=1
+  mutate test_git_credentials 'if (substr($0, 1, 8) != "https://")' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (at_pos == 0)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (colon_pos == 0)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (user == "" || token == "")' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (pos + 2 > length(s))' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (hex !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (path != "" && substr(path, length(path) - 3) == ".git")' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (path != "" && substr(path, length(path)) == "/")' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (index(path, "//") > 0)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (index(" " seen " ", " " key " ") > 0)' 'if (1)' agent-pod || rc=1
+  # Mutants for scopes message
+  mutate test_git_credentials 'printf "%s", host;' 'printf "%s", user;' agent-pod || rc=1
+  mutate test_git_credentials 'printf "%s", host;' 'printf "%s", token;' agent-pod || rc=1
+  mutate test_git_credentials 'if (path != "") printf "/%s", path;' 'if (path != "") printf "%s", token;' agent-pod || rc=1
+  # Mutants for refuse_writable_file label
+  mutate test_git_credentials 'refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)"' 'refuse_writable_file "git credentials"' agent-pod || rc=1
+  # Mutants for awk exit status check
+  mutate test_git_credentials 'if [ $_validation_rc -ne 0 ]; then' 'if false; then' agent-pod || rc=1
+  # Mutants for Step E: guard
+  mutate test_git_credentials 'refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"' 'true' agent-pod || rc=1
+  # Mutants for Step E: mount
+  mutate test_git_credentials 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")' 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials")' agent-pod || rc=1
+  # Mutants for Step E: GIT_CONFIG variables
+  mutate test_git_credentials 'GIT_CONFIG_COUNT=2' 'GIT_CONFIG_COUNT=1' agent-pod || rc=1
+  mutate test_git_credentials 'credential.helper' 'credential.helper2' agent-pod || rc=1
+  mutate test_git_credentials '/usr/local/bin/git-credential-agent-pod' '/usr/bin/git-credential-agent-pod' agent-pod || rc=1
+  mutate test_git_credentials 'credential.useHttpPath' 'credential.useHttpPath2' agent-pod || rc=1
+  mutate test_git_credentials 'GIT_CONFIG_VALUE_1=true' 'GIT_CONFIG_VALUE_1=false' agent-pod || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
