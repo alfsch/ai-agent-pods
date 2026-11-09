@@ -233,6 +233,19 @@ for _d in $A_EXTRA_DIRS; do
   EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$A_KEY-${_d##*/}:/home/agent-pod/$_d")
 done
 
+# Check that a file is not in a directory the pod can write (project, state dir, mounted config dirs).
+# The pod could replace it with a symlink to a host file.
+refuse_writable_file() {
+  local option_name="$1" file="$2"
+  local _gd _w
+  _gd="$(cd "$(dirname "$file")" && pwd -P)" || die "Cannot use $file."
+  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-${_d##*/}"); done
+  for _w in "${_writable[@]}"; do
+    _w="$(cd "$_w" && pwd -P)" || continue
+    case "$_gd/" in "$_w"/*) die "The $option_name $file is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
+  done
+}
+
 # The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
 # thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
 # commit as another identity); else <agent>-<profile>.gitconfig (with a profile), else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
@@ -252,11 +265,7 @@ fi
 if [ -n "$_g" ]; then
   _gd="$(cd "$(dirname "$_g")" && pwd -P)" || die "Cannot use $_g."
   _g="$_gd/$(basename "$_g")"
-  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-${_d##*/}"); done
-  for _w in "${_writable[@]}"; do
-    _w="$(cd "$_w" && pwd -P)" || continue
-    case "$_gd/" in "$_w"/*) die "The git config $_g is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
-  done
+  refuse_writable_file "git config" "$_g"
   GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
 fi
 
