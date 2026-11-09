@@ -30,7 +30,7 @@ Copilot CLI and goose alike; it is about the container, not about the project.
   inputs and outputs in the project folder or pipe them through stdin and stdout.
 - `gh` is authenticated only if the host had `GH_TOKEN` or `GITHUB_TOKEN` set: Copilot CLI sessions pass them on,
   Claude Code and goose sessions do not (`COPILOT_GITHUB_TOKEN` is for Copilot itself, not for `gh`). `gh auth login` works
-  with the open network, but its login is lost when the session ends. There is no SSH key. `git` over HTTPS has credentials only if the user gave the session a credentials file (then `git push` works for the hosts in it, and `gh` for GitHub); `git` has an identity only if the user gave the session a git config (mounted read-only as `~/.gitconfig`); without one, commits fail with "Author identity unknown" and you can pass one per command (`git -c user.name=... -c user.email=... commit`).
+  with the open network, but its login is lost when the session ends. There is no SSH key. `git` over HTTPS has credentials only if the user gave the session a credentials file (then `git push` works for the hosts in it, and `gh` for GitHub and GitHub Enterprise Server); `git` has an identity only if the user gave the session a git config (mounted read-only as `~/.gitconfig`); without one, commits fail with "Author identity unknown" and you can pass one per command (`git -c user.name=... -c user.email=... commit`).
 
 Tools on PATH: git, curl, less, jq, gh, yq, python3, pip, pdftotext, qpdf, tesseract, node, npm, docker
 

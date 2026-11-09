@@ -164,14 +164,14 @@ Examples:
 - GitHub organization: `https://user:ghp_...@github.com/my-org` (serves `my-org/*`)
 - GitHub repository: `https://user:ghp_...@github.com/my-org/my-repo` (serves only this repository)
 - GitLab with OAuth token: `https://oauth2:glpat-...@gitlab.com`
-- Codeberg/Forgejo: `https://user:token@codeberg.org/my-org/my-repo.git`
+- Codeberg/Forgejo: `https://user:token@codeberg.org/my-org/my-repo`
 - GitHub Enterprise Server with port: `https://user:token@git.example.com:8443`
 
 A host-level line (no path) is the fallback for the host. `gh` needs a host-level line for the host it talks to (set by `GH_HOST` or `github.com` by default). The longest matching prefix wins: a line for `org-b/special` matches `org-b/special/x` but not `org-b/specialx`. Lines with `#` and blank lines are ignored. `%XX` escapes in user and token are decoded as git does.
 
-The launcher mounts the file read-only as `/run/agent-pod/git-credentials` and configures a get-only credential helper, so the pod cannot change the file. Whatever it holds is visible to the pod: keep it to the credentials. A file in the project folder or in a directory the pod can write is refused, because the pod could swap it for a symlink to a host file. Separate files per project give you separation; a token the pod can read can be sent anywhere the network allows, so use fine-grained tokens with short expiry where possible. Note the [fine-grained token / packages API limit](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens) on GitHub. SSH remotes are not covered.
+The launcher mounts the file read-only as `/run/agent-pod/git-credentials` and configures a get-only credential helper, so the pod cannot change the file. Whatever it holds is visible to the pod: keep it to the credentials. A file in the project folder or in a directory the pod can write is refused, because the pod could swap it for a symlink to a host file. Separate files per project give you separation; a token the pod can read can be sent anywhere the network allows (the network is open), so use fine-grained tokens with short expiry where possible. See [issue #41](https://github.com/alfsch/ai-agent-pods/issues/41) for details. SSH remotes are not covered.
 
-`uninstall.sh` removes `~/.config/agent-pod` (so credentials files kept there are removed after its confirmation).
+`uninstall.sh` removes the agent images, state dirs, cache volumes and sidecars; credentials files in `~/.config/agent-pod` are not removed and must be deleted by hand.
 
 ### Using Docker inside the pod
 
