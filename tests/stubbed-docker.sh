@@ -22,6 +22,7 @@ CHECKSH="${CHECKSH:-$ROOT/tests/check.sh}"
 PODENV="${PODENV:-$ROOT/pod-environment.md}"   # what the agent is told about its container, checked in test_pod_environment_docker
 PRUNEWF="${PRUNEWF:-$ROOT/.github/workflows/prune-base-images.yaml}"   # that workflow, whose schedule is checked in test_prune_workflow_schedule
 DOCKERFILE="${DOCKERFILE:-$ROOT/Dockerfile}"   # the agent Dockerfile whose install layer is run in test_agent_install_layer
+DOCKERFILE_BASE="${DOCKERFILE_BASE:-$ROOT/Dockerfile.base}"   # the base Dockerfile whose helper scripts are extracted in test_git_credential_helper
 # The suite runs for one agent (the launcher takes it as its first argument); the agent differences have tests of their own.
 AGENT="${AGENT-claude}"
 
@@ -1134,6 +1135,138 @@ test_agent_install_layer() {   # the install layer of Dockerfile runs the agent 
   [ "$(installs)" = 3 ] || fail "expected 3 installs, got $(installs)"; in_out 'Attempt 3 of installing pkg@1.2.3 failed'
 }
 
+
+test_git_credential_helper() {   # the git-credential-agent-pod helper in the base image: get-only, matches by host/port/path
+  local script fixture
+  script="$(sed -n '/^RUN cat > \/usr\/local\/bin\/git-credential-agent-pod /,/^GIT_CRED_EOF$/p' "$DOCKERFILE_BASE" | sed '1d;$d')"
+  [ -n "$script" ] || fail "git-credential-agent-pod script not found in $DOCKERFILE_BASE"
+  
+  setup_case
+  fixture="$CASE/creds"
+  printf '%s\n' "$script" > "$CASE/git-credential-agent-pod"
+  chmod +x "$CASE/git-credential-agent-pod"
+  
+  # Test: basic match
+  printf 'https://user:S3CRET-TOKEN-0001@github.com/org/repo\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user$' "$CASE/out" || fail "expected username=user"
+  grep '^password=S3CRET-TOKEN-0001$' "$CASE/out" || fail "expected password"
+  
+  # Test: .git stripped from path
+  printf 'https://user:S3CRET-TOKEN-0001@github.com/org/repo\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo.git\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user$' "$CASE/out" || fail "expected username with .git stripped"
+  
+  # Test: longer prefix wins (longer comes first)
+  printf 'https://user2:S3CRET-TOKEN-0005@github.com/org/repo\nhttps://user1:S3CRET-TOKEN-0004@github.com/org\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user2$' "$CASE/out" || fail "expected user2 (longer prefix)"
+  
+  # Test: prefix match (shorter line first, longer line last) - for mutant
+  printf 'https://user1:S3CRET-TOKEN-0016@github.com/org\nhttps://user2:S3CRET-TOKEN-0017@github.com/org/other\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/other\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user2$' "$CASE/out" || fail "expected user2 for prefix match"
+  
+  # Test: prefix match (longer line first, shorter line last) - for mutant
+  printf 'https://user2:S3CRET-TOKEN-0017@github.com/org/other\nhttps://user1:S3CRET-TOKEN-0016@github.com/org\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/other\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user2$' "$CASE/out" || fail "expected user2 for prefix match (longer first)"
+  
+  # Test: segment boundary - org-b/special does NOT match org-b/specialx
+  printf 'https://user:S3CRET-TOKEN-0006@github.com/org-b/special\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org-b/specialx\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "expected no match for segment boundary"
+  
+  # Test: URL-encoded user (%40 = @)
+  printf 'https://me%%40x.org:S3CRET-TOKEN-0015@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=me@x.org$' "$CASE/out" || fail "expected decoded username me@x.org"
+  
+  # Test: URL-encoded token (%2F = /)
+  printf 'https://user:tok%%2Fen@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^password=tok/en$' "$CASE/out" || fail "expected decoded password tok/en"
+  
+  # Test: backslash in token stays literal (not interpreted as escape)
+  printf 'https://user:back\\nslash@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^password=back\\nslash$' "$CASE/out" || fail "expected literal backslash-n in password"
+  
+  # Test: %25 decodes to %, %zz stays as-is
+  printf 'https://user:a%%25b%%zzc@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^password=a%b%zzc$' "$CASE/out" || fail "expected %25->% and %zz to stay as-is"
+  
+  # Test: host-level fallback
+  printf 'https://user:S3CRET-TOKEN-0007@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user$' "$CASE/out" || fail "expected host-level fallback"
+  
+  # Test: no match
+  printf 'https://user:S3CRET-TOKEN-0008@gitlab.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "expected no output for no match"
+  
+  # Test: store is no-op
+  printf 'https://user:S3CRET-TOKEN-0012@github.com\n' > "$fixture"
+  cksum_before="$(cksum "$fixture" | awk '{print $1, $2}')"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" store > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "store should print nothing"
+  cksum_after="$(cksum "$fixture" | awk '{print $1, $2}')"
+  [ "$cksum_before" = "$cksum_after" ] || fail "store changed the file"
+  
+  # Test: erase is no-op
+  printf 'https://user:S3CRET-TOKEN-0013@github.com\n' > "$fixture"
+  cksum_before="$(cksum "$fixture" | awk '{print $1, $2}')"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" erase > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "erase should print nothing"
+  cksum_after="$(cksum "$fixture" | awk '{print $1, $2}')"
+  [ "$cksum_before" = "$cksum_after" ] || fail "erase changed the file"
+  
+  # Test: missing file
+  printf '' | AGENT_POD_CREDENTIALS_FILE="$CASE/nonexistent" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "missing file should produce no output"
+  
+  # Test: another scheme does not match
+  printf 'https://user:S3CRET-TOKEN-0009@github.com\n' > "$fixture"
+  printf 'protocol=http\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "expected no match for http scheme"
+  
+  # Test: another port does not match (credential has port, request doesn't)
+  printf 'https://user:S3CRET-TOKEN-0010@github.com:8443\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "expected no match for different port"
+  
+  # Test: another port does not match (request has port, credential doesn't)
+  printf 'https://user:S3CRET-TOKEN-0018@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com:8443\npath=org/repo\n\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  [ ! -s "$CASE/out" ] || fail "expected no match when credential lacks port but request has one"
+  
+  # Test: blank line ends the input
+  printf 'https://user:S3CRET-TOKEN-0014@github.com\n' > "$fixture"
+  printf 'protocol=https\nhost=github.com\n\npath=org/repo\n' | AGENT_POD_CREDENTIALS_FILE="$fixture" "$CASE/git-credential-agent-pod" get > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^username=user$' "$CASE/out" || fail "expected match with blank line ending input"
+}
+
 test_publish_signs_created_digest() {   # the workflow signs the digest of the manifest it created, never what the tag points at later
   local d create sign index want
   step_body() {   # step_body <step name>: the run: block of that step of the workflow
@@ -1398,7 +1531,7 @@ mutants_flush() {   # prints the results that are done, in order, up to the firs
 mutants_finish() { wait; mutants_flush; ! ls "$MUT_DIR"/*.bad >/dev/null 2>&1; }   # fails when a mutant survived
 mutate() {   # mutate <test> <old> <new> [install.sh]   (literal replacement in a copy of the launcher, or of install.sh)
   local test="$1" old="$2" new="$3" file="${4:-agent-pod}" src var=LAUNCHER n; src="$(cat "$ROOT/$file"; echo x)"; src="${src%x}"
-  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; pod-environment.md) var=PODENV ;; renovate.json) var=RENOVATEJSON ;; tests/check.sh) var=CHECKSH ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
+  case "$file" in install.sh) var=INSTALLER ;; uninstall.sh) var=UNINSTALLER ;; tests/integration.sh) var=ITEST ;; tests/published-base-tag.sh) var=PUBTAG ;; .github/scripts/prune-base-images.sh) var=PRUNE ;; pod-environment.md) var=PODENV ;; renovate.json) var=RENOVATEJSON ;; tests/check.sh) var=CHECKSH ;; .github/workflows/prune-base-images.yaml) var=PRUNEWF ;; Dockerfile) var=DOCKERFILE ;; Dockerfile.base) var=DOCKERFILE_BASE ;; .github/workflows/publish-base.yaml) var=WORKFLOW ;; esac
   declare -F "$test" >/dev/null || { echo "  ERROR  mutant names an unknown test: $test"; return 1; }
   [[ "$src" == *"$old"* ]] || { echo "  ERROR  mutant for $test does not apply: $old"; return 1; }
   MUT_N=$((MUT_N + 1)); n=$MUT_N
@@ -1536,6 +1669,13 @@ run_mutants() {
   mutate test_skills_dir    'A_SKILLS_TARGET=.agents/skills' 'A_SKILLS_TARGET=.claude/skills' || rc=1
   mutate test_skills_dir    'A_SKILLS_TARGET=.claude/skills' 'A_SKILLS_TARGET=.claude/other' || rc=1
   mutate test_skills_dir    'if [ -n "${AGENT_POD_SKILLS_DIR:-}" ]; then' 'if false; then' || rc=1
+  mutate test_git_credential_helper 'case "$path" in *.git) path="${path%.git}" ;; esac' ':' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'if (length(cred_path) > best_len)' 'if (1)' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'substr(path, 1, length(cred_path) + 1) == cred_path "/"' 'substr(path, 1, length(cred_path)) == cred_path' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'case "$1" in' 'case "get" in' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'req_port=""' 'req_port="8443"' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'urldecode(substr(creds' 'substr(creds' Dockerfile.base || rc=1
+  mutate test_git_credential_helper 'if ((hex1 ~ /[0-9A-Fa-f]/) && (hex2 ~ /[0-9A-Fa-f]/))' 'if (1)' Dockerfile.base || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
