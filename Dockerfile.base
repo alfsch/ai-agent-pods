@@ -229,6 +229,67 @@ esac
 GIT_CRED_EOF
 RUN chmod 755 /usr/local/bin/git-credential-agent-pod
 
+# gh wrapper that reads token from the git credentials helper per call
+RUN cat > /usr/local/bin/gh <<'GH_WRAPPER_EOF'
+#!/bin/sh
+# gh wrapper for agent-pod: reads token from git-credential-agent-pod per call
+# If a token variable is already set, exec the real gh unchanged.
+# Otherwise, ask the helper for the host and pass the token to the real gh
+# in the variable gh reads for that host (GH_TOKEN for github.com and *.ghe.com,
+# GH_ENTERPRISE_TOKEN for other hosts).
+
+# Check if any token is already set
+if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+  exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+fi
+
+# Try to get credentials from the helper
+CRED_FILE="${AGENT_POD_CREDENTIALS_FILE:-/run/agent-pod/git-credentials}"
+
+# Only try to get credentials if the file exists
+if [ -f "$CRED_FILE" ]; then
+  # Check if helper is available
+  if ! command -v git-credential-agent-pod >/dev/null 2>&1; then
+    printf 'gh: git-credential-agent-pod helper not found\n' >&2
+    exit 1
+  fi
+  
+  # Ask the helper directly for the host-level credential
+  _host="${GH_HOST:-github.com}"
+  _output=$(
+    AGENT_POD_CREDENTIALS_FILE="$CRED_FILE" git-credential-agent-pod get <<EOF
+protocol=https
+host=$_host
+
+EOF
+  )
+  
+  # Extract password from helper output
+  _password=$(printf '%s' "$_output" | grep '^password=' | head -1 | cut -d= -f2-)
+  
+  if [ -n "$_password" ]; then
+    # Determine which variable to use based on the host
+    # GH_TOKEN for github.com and *.ghe.com, GH_ENTERPRISE_TOKEN for others
+    case "$_host" in
+      github.com|*.ghe.com)
+        GH_TOKEN="$_password" exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+        ;;
+      *)
+        GH_ENTERPRISE_TOKEN="$_password" exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+        ;;
+    esac
+  else
+    # File exists but no host-level credential for this host
+    printf 'gh: no host-level credential for %s in the git credentials file\n' "$_host" >&2
+    exit 1
+  fi
+else
+  # No credentials file, run the real gh unchanged
+  exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+fi
+GH_WRAPPER_EOF
+RUN chmod 755 /usr/local/bin/gh
+
 # Interactive-shell setup, appended to /etc/bash.bashrc. Only interactive bash sources this file, so
 # none of it touches the non-interactive `agent-pod <agent> ...` path. The dynamic, /etc/passwd-less
 # user has no $HOME/.bashrc of its own, so these baseline conveniences have to live in the system-wide

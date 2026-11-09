@@ -1267,6 +1267,114 @@ test_git_credential_helper() {   # the git-credential-agent-pod helper in the ba
   grep '^username=user$' "$CASE/out" || fail "expected match with blank line ending input"
 }
 
+test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helper per call
+  local script wrapper helper fixture fake_gh
+  script="$(sed -n '/^RUN cat > \/usr\/local\/bin\/gh /,/^GH_WRAPPER_EOF$/p' "$DOCKERFILE_BASE" | sed '1d;$d')"
+  [ -n "$script" ] || fail "gh wrapper script not found in $DOCKERFILE_BASE"
+  
+  # Also extract the helper script for the test
+  helper="$(sed -n '/^RUN cat > \/usr\/local\/bin\/git-credential-agent-pod /,/^GIT_CRED_EOF$/p' "$DOCKERFILE_BASE" | sed '1d;$d')"
+  [ -n "$helper" ] || fail "git-credential-agent-pod script not found in $DOCKERFILE_BASE"
+
+  setup_case
+  wrapper="$CASE/gh"
+  printf '%s\n' "$script" > "$wrapper"
+  chmod +x "$wrapper"
+  
+  # Create the helper script in the test directory
+  printf '%s\n' "$helper" > "$CASE/git-credential-agent-pod"
+  chmod +x "$CASE/git-credential-agent-pod"
+  
+  # Create a fake gh that prints its token variables and arguments
+  fake_gh="$CASE/fake-gh"
+  printf '%s\n' '#!/bin/sh' 'echo "FAKE_GH_TOKEN=$GH_TOKEN"' 'echo "FAKE_GITHUB_TOKEN=$GITHUB_TOKEN"' 'echo "FAKE_GH_ENTERPRISE_TOKEN=$GH_ENTERPRISE_TOKEN"' 'echo "FAKE_GITHUB_ENTERPRISE_TOKEN=$GITHUB_ENTERPRISE_TOKEN"' > "$fake_gh"
+  printf '%s\n' 'for arg in "$@"; do printf "[arg] %s\n" "$arg"; done' >> "$fake_gh"
+  chmod +x "$fake_gh"
+  
+  # Create a credentials file
+  fixture="$CASE/creds"
+  printf 'https://user:S3CRET-TOKEN-0001@github.com\n' > "$fixture"
+  
+  # Test 1: token is passed to child as GH_TOKEN for github.com
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-0001$' "$CASE/out" || fail "expected token in fake gh output"
+  
+  # Test 2: existing GH_TOKEN is kept
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_TOKEN=existing-token "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=existing-token$' "$CASE/out" || fail "expected existing GH_TOKEN to be kept"
+  
+  # Test 3: existing GITHUB_TOKEN is kept
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GITHUB_TOKEN=existing-github-token "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GITHUB_TOKEN=existing-github-token$' "$CASE/out" || fail "expected existing GITHUB_TOKEN to be kept"
+  
+  # Test 4: existing GH_ENTERPRISE_TOKEN is kept
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_ENTERPRISE_TOKEN=existing-enterprise "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_ENTERPRISE_TOKEN=existing-enterprise$' "$CASE/out" || fail "expected existing GH_ENTERPRISE_TOKEN to be kept"
+  
+  # Test 5: existing GITHUB_ENTERPRISE_TOKEN is kept
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GITHUB_ENTERPRISE_TOKEN=existing-github-enterprise "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GITHUB_ENTERPRISE_TOKEN=existing-github-enterprise$' "$CASE/out" || fail "expected existing GITHUB_ENTERPRISE_TOKEN to be kept"
+  
+  # Test 6: missing host-level line with existing file prints error and exits 1
+  printf 'https://user:S3CRET-TOKEN-0002@gitlab.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: no host-level credential for github.com in the git credentials file' "$CASE/err" || fail "expected error message for missing host-level credential"
+  # Verify fake gh was NOT called
+  grep -q 'FAKE_GH' "$CASE/out" && fail "fake gh should not have been called"
+  
+  # Test 7: GH_HOST with ghes.example.com uses GH_ENTERPRISE_TOKEN
+  printf 'https://user:S3CRET-TOKEN-0005@ghes.example.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=ghes.example.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_ENTERPRISE_TOKEN=S3CRET-TOKEN-0005$' "$CASE/out" || fail "expected GH_ENTERPRISE_TOKEN for ghes.example.com"
+  
+  # Test 8: GH_HOST with github.com uses GH_TOKEN
+  printf 'https://user:S3CRET-TOKEN-0006@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=github.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-0006$' "$CASE/out" || fail "expected GH_TOKEN for github.com"
+  
+  # Test 9: GH_HOST with *.ghe.com uses GH_TOKEN
+  printf 'https://user:S3CRET-TOKEN-0007@company.ghe.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=company.ghe.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-0007$' "$CASE/out" || fail "expected GH_TOKEN for *.ghe.com"
+  
+  # Test 10: no file at all runs the real gh unchanged
+  # Remove the fixture file to ensure it doesn't exist
+  rm -f "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$CASE/nonexistent" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=$' "$CASE/out" || fail "expected empty token when no credentials file"
+  grep '^\[arg\] repo' "$CASE/out" || fail "expected arguments passed through"
+  grep '^\[arg\] list$' "$CASE/out" || fail "expected arguments passed through"
+  
+  # Test 11: arguments with spaces are passed through
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list --limit 10 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^\[arg\] repo$' "$CASE/out" || fail "expected repo argument"
+  grep '^\[arg\] list$' "$CASE/out" || fail "expected list argument"
+  grep '^\[arg\] --limit$' "$CASE/out" || fail "expected --limit argument"
+  grep '^\[arg\] 10$' "$CASE/out" || fail "expected 10 argument"
+  
+  # Test 12: per-repository-only file (no host-level line) with github.com host
+  printf 'https://user:S3CRET-TOKEN-0008@github.com/org/repo\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: no host-level credential for github.com in the git credentials file' "$CASE/err" || fail "expected error for per-repository-only file"
+  
+  # Test 13: helper not found in PATH
+  PATH="/nonexistent" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: git-credential-agent-pod helper not found' "$CASE/err" || fail "expected helper not found error"
+}
+
 test_publish_signs_created_digest() {   # the workflow signs the digest of the manifest it created, never what the tag points at later
   local d create sign index want
   step_body() {   # step_body <step name>: the run: block of that step of the workflow
@@ -1676,6 +1784,12 @@ run_mutants() {
   mutate test_git_credential_helper 'req_port=""' 'req_port="8443"' Dockerfile.base || rc=1
   mutate test_git_credential_helper 'urldecode(substr(creds' 'substr(creds' Dockerfile.base || rc=1
   mutate test_git_credential_helper 'if ((hex1 ~ /[0-9A-Fa-f]/) && (hex2 ~ /[0-9A-Fa-f]/))' 'if (1)' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"' 'GH_TOKEN="$_password"; exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then' 'if false; then' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_host="${GH_HOST:-github.com}"' '_host="github.com"' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'github.com|*.ghe.com)' 'github.com)' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'GH_ENTERPRISE_TOKEN="$_password" exec' 'GH_TOKEN="$_password" exec' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'if ! command -v git-credential-agent-pod >/dev/null 2>&1; then' 'if false; then' Dockerfile.base || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
