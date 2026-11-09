@@ -19,7 +19,7 @@ RUN apt-get update \
 # copy the static binary out of the official multi-arch image; Docker picks the right architecture.
 # The tag@digest pair is kept current by Renovate (see renovate.json), and the digest pins the exact
 # image contents.
-COPY --from=mikefarah/yq:4.54.1@sha256:4b3d9475d65571d28cbb19544d3820ec2945e4c8b2f18279394282b8dc3a592e /usr/bin/yq /usr/local/bin/yq
+COPY --from=mikefarah/yq:4.54.2@sha256:5d56494617dce8311106e905aac5c080a2087c905a7f7de2984db2e2cc60ab2e /usr/bin/yq /usr/local/bin/yq
 
 # Docker CLI (with the compose and buildx plugins) only, no daemon. Pinned by digest, kept current by Renovate. It is inert unless the launcher is run with
 # DOCKER=1, which points it at a rootless Docker-in-Docker sidecar via DOCKER_HOST.
