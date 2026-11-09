@@ -47,6 +47,7 @@ usage() {
   row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
   row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
   row "Git identity:"      "AGENT_POD_GITCONFIG=~/.gitconfig-work $HERE/agent-pod claude"
+  row "Git credentials:"   "AGENT_POD_GIT_CREDENTIALS=~/.config/agent-pod/credentials $HERE/agent-pod claude"
   row "Second login:"      "AGENT_POD_PROFILE=work $HERE/agent-pod claude"
   row "Extra skills:"      "AGENT_POD_SKILLS_DIR=~/skills $HERE/agent-pod claude"
   printf '\n'

@@ -72,6 +72,7 @@ test that fails without it.
   project leave hooks or MCP entries for the next session in another; it is documented in the README, with the way to
   separate untrusted work (another `HOME`). Do not "fix" it by silently changing what is shared.
 - The `node:<major>-slim` literals in `uninstall.sh` and the README are kept in sync with the Dockerfile by Renovate's regex manager.
+- The helper `git-credential-agent-pod` is get-only: it never writes to the credentials file (the mount is read-only) and never prompts, so it cannot lock the file or leak it. The scripts are inline in `Dockerfile.base` so that the hash of the base image is made from `Dockerfile.base` and `pod-environment.md` only; separate script files would have to be added to the hash calculation. The `gh` wrapper reads the token from the helper per call instead of using `GH_TOKEN` to avoid putting the token in the environment where it could be leaked.
 - Renovate does not look in `tests/` by default (`config:recommended` ignores `**/tests/**`); `renovate.json` overrides `ignorePaths`
   so that the digest-pinned ShellCheck image in `tests/check.sh` is bumped, and `test_renovate_shellcheck` pins both.
 - `install.sh` pulls the published base (`ghcr.io/alfsch/agent-pod-base:<hash of Dockerfile.base and

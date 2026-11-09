@@ -103,6 +103,7 @@ Run `/login` in Claude Code or Copilot CLI (`goose configure` in goose) and foll
 | Account binding, trust state | `~/.config/agent-pod/claude.json` | `~/.config/agent-pod/claude-work.json` |
 | Mounted global skills dirs | `~/.config/agent-pod/claude-skills/` | `~/.config/agent-pod/claude-work-skills/` |
 | Git identity | `claude.gitconfig`, else `gitconfig` | `claude-work.gitconfig`, else `claude.gitconfig`, else `gitconfig` |
+| Git credentials | `claude.credentials`, else `credentials` | `claude-work.credentials`, else `claude.credentials`, else `credentials` |
 
 The same holds for `copilot` and `goose`. Log in once per profile (`/login`, or `goose configure`); everything is created on the first start. Without the variable nothing changes. Aliases keep it short:
 
@@ -150,7 +151,27 @@ All of them are environment variables in front of the launcher:
     email = you@example.com
 ```
 
-The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file (with `AGENT_POD_PROFILE`, `<agent>-<profile>.gitconfig` wins over both); for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity; a file in the project folder or in a directory the pod can write is refused too, because the pod could swap it for a symlink to a host file). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. A symlink you make there is followed.
+The launcher mounts it read-only as `~/.gitconfig`. For another identity per agent use `~/.config/agent-pod/<agent>.gitconfig`, which wins over the shared file (with `AGENT_POD_PROFILE`, `<agent>-<profile>.gitconfig` wins over both); for another one per project or session use `AGENT_POD_GITCONFIG` (it wins over both, and an override that is not a file stops the launcher instead of falling back to another identity; a file in the project folder or in a directory the pod can write is refused too, because the pod could swap it for a symlink to a host file). Without any of them nothing is mounted. Whatever the file contains is visible to the pod, so keep to the identity: no credential helpers or tokens. Put tokens in a git credentials file instead (see below). A symlink you make there is followed.
+
+**Git credentials.** To let `git` over HTTPS and `gh` work, hand the pod a file of HTTPS git credentials. Put it in `~/.config/agent-pod/credentials` (or `<agent>.credentials`, `<agent>-<profile>.credentials` with `AGENT_POD_PROFILE`, or any file you name with `AGENT_POD_GIT_CREDENTIALS`). The file format is one line per scope:
+
+```
+https://<user>:<token>@<host>[:port][/org[/repo]]
+```
+
+Examples:
+- GitHub: `https://user:ghp_...@github.com` (host-level, serves all repositories)
+- GitHub organization: `https://user:ghp_...@github.com/my-org` (serves `my-org/*`)
+- GitHub repository: `https://user:ghp_...@github.com/my-org/my-repo` (serves only this repository)
+- GitLab with OAuth token: `https://oauth2:glpat-...@gitlab.com`
+- Codeberg/Forgejo: `https://user:token@codeberg.org/my-org/my-repo.git`
+- GitHub Enterprise Server with port: `https://user:token@git.example.com:8443`
+
+A host-level line (no path) is the fallback for the host. `gh` needs a host-level line for the host it talks to (set by `GH_HOST` or `github.com` by default). The longest matching prefix wins: a line for `org-b/special` matches `org-b/special/x` but not `org-b/specialx`. Lines with `#` and blank lines are ignored. `%XX` escapes in user and token are decoded as git does.
+
+The launcher mounts the file read-only as `/run/agent-pod/git-credentials` and configures a get-only credential helper, so the pod cannot change the file. Whatever it holds is visible to the pod: keep it to the credentials. A file in the project folder or in a directory the pod can write is refused, because the pod could swap it for a symlink to a host file. Separate files per project give you separation; a token the pod can read can be sent anywhere the network allows, so use fine-grained tokens with short expiry where possible. Note the [fine-grained token / packages API limit](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#fine-grained-personal-access-tokens) on GitHub. SSH remotes are not covered.
+
+`uninstall.sh` removes `~/.config/agent-pod` (so credentials files kept there are removed after its confirmation).
 
 ### Using Docker inside the pod
 

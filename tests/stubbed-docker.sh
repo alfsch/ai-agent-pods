@@ -601,6 +601,7 @@ test_agent_selection() {   # the agent comes from the name the launcher was call
   done
   # --help works without Docker work
   setup_case; AGENT='' launch -- --help; rc_is 0; in_out 'agent-pod claude'; [ ! -s "$STUB_LOG" ] || fail "--help talked to docker"
+  in_out 'Git credentials:'
 }
 test_agent_flags() {   # per agent: its state dir and config file, its self-updater switch, forwarded token variables
   setup_case; AGENT=claude launch -- true
