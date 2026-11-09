@@ -302,6 +302,93 @@ else fail "the session that prunes starts and ends normally (exit $rc)"; tail -n
 check_not "a cache unused for longer than the limit is removed" sd volume inspect "$PRUNE_VOL"
 check "the current project's cache is kept" sd volume inspect "$CACHE_VOL"
 
+section "git credentials"
+# Create a credentials file outside the project with fake tokens
+CREDS_DIR="$(mktemp -d)"
+CREDS_FILE="$CREDS_DIR/creds"
+printf 'https://test-user:S3CRET-TOKEN-0001@github.com\nhttps://test-user2:S3CRET-TOKEN-0002@gitlab.com\nhttps://test-user3:S3CRET-TOKEN-0003@git.example.com:8443\n' > "$CREDS_FILE"
+cp "$CREDS_FILE" "$WORK/creds.before"
+
+# Build a script that tests all git credential functionality in one session
+POD_SCRIPT='
+# Test git credential fill for each host
+for host in github.com gitlab.com git.example.com:8443; do
+  case "$host" in
+    gitlab.com) expected_user="test-user2" expected_pass="S3CRET-TOKEN-0002" ;;
+    git.example.com:8443) expected_user="test-user3" expected_pass="S3CRET-TOKEN-0003" ;;
+    *) expected_user="test-user" expected_pass="S3CRET-TOKEN-0001" ;;
+  esac
+  result=$(printf "protocol=https\nhost=%s\n\n" "$host" | /usr/local/bin/git-credential-agent-pod get)
+  expected="username=$expected_user
+password=$expected_pass"
+  if [ "$result" = "$expected" ]; then
+    echo "STEP ok git credential fill returns correct user and password for $host"
+  else
+    echo "STEP FAIL git credential fill returns correct user and password for $host"
+    echo "  expected: $expected"
+    echo "  got: $result"
+  fi
+done
+
+# Test unknown host returns nothing and exits 0
+result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | /usr/local/bin/git-credential-agent-pod get)
+if [ -z "$result" ]; then
+  echo "STEP ok unknown host returns nothing"
+else
+  echo "STEP FAIL unknown host returns nothing"
+  echo "  got: $result"
+fi
+
+# Test store and erase leave the file byte-identical
+cp /run/agent-pod/git-credentials /tmp/creds-backup
+printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-0001\n\n" | git credential store
+printf "protocol=https\nhost=github.com\n\n" | git credential erase
+if cmp -s /run/agent-pod/git-credentials /tmp/creds-backup; then
+  echo "STEP ok store and erase leave the credentials file byte-identical"
+else
+  echo "STEP FAIL store and erase leave the credentials file byte-identical"
+fi
+rm -f /tmp/creds-backup
+
+# Test gh is the wrapper
+gh_path=$(command -v gh)
+if [ "$gh_path" = "/usr/local/bin/gh" ]; then
+  echo "STEP ok gh is the wrapper in the pod"
+else
+  echo "STEP FAIL gh is the wrapper in the pod"
+  echo "  got: $gh_path"
+fi
+
+# Test that the fake tokens do not appear in the environment
+if ! env | grep -q "S3CRET-TOKEN"; then
+  echo "STEP ok fake tokens do not appear in pod environment"
+else
+  echo "STEP FAIL fake tokens do not appear in pod environment"
+  env | grep "S3CRET-TOKEN"
+fi
+'
+
+# Run the session with the credentials file
+run_launcher AGENT_POD_GIT_CREDENTIALS="$CREDS_FILE" -- sh -c "$POD_SCRIPT" sh >"$WORK/git-creds.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "git credentials session exits 0"; else fail "git credentials session exits 0 (got $rc)"; tail -n 20 "$WORK/git-creds.out" | indent; fi
+
+# Check the output for the expected STEP lines
+session_failed=$([ "$rc" = 0 ] || echo 1)
+while IFS= read -r line; do
+  case "$line" in
+    "STEP ok "*) ok "${line#STEP ok }" ;;
+    "STEP FAIL "*) fail "${line#STEP FAIL }"; session_failed=1 ;;
+  esac
+done <"$WORK/git-creds.out"
+[ "$(grep -c '^STEP ok ' "$WORK/git-creds.out")" -eq 7 ] || { fail "git credentials session ran all its steps"; session_failed=1; }
+[ -z "$session_failed" ] || { echo "  session output:"; tail -n 60 "$WORK/git-creds.out" | indent; }
+
+# Check that the credentials file on the host is unchanged
+cmp -s "$CREDS_FILE" "$WORK/creds.before" && ok "the credentials file on the host is unchanged" || fail "the credentials file on the host is unchanged"
+
+# Clean up
+rm -rf "$CREDS_DIR"
+
 section "nothing left behind"
 LEAKS=; SNAP_OK=
 for _ in $(seq 1 30); do
