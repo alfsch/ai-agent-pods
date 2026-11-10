@@ -247,48 +247,42 @@ refuse_writable_file() {
   done
 }
 
-# Resolve symlinks for a file, following at most 20 links, and validate each hop
-# Echoes the final target path to stdout, or dies on error
+# refuse_writable_file only looks at the directory a file physically lies in, which hides a symlinked directory in
+# the path: $PROJECT/pivot/credentials, with pivot a link to somewhere else, passes, and the pod can retarget pivot.
+# So every directory in the path (as written) that is a symlink must itself be out of the pod's reach.
+refuse_writable_path() {
+  local label="$1" p="$2"
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  p="$(dirname "$p")"
+  while [ "$p" != "/" ] && [ "$p" != "." ]; do
+    if [ -L "$p" ]; then refuse_writable_file "$label" "$p"; fi
+    p="$(dirname "$p")"
+  done
+}
+
+# The file a credentials path leads to, after at most 20 symlinks, as an absolute physical path. The original path and every
+# hop are checked before the link is followed: a link the pod can replace would let it choose the file of the next session.
 resolve_symlink_chain() {
-  local file="$1"
-  local option_name="$2"
-  local max_steps=20
-  local step=0
-  local current="$file"
-  
-  # Check the original path
+  local file="$1" option_name="$2" max_steps=20 step=0 current target dir
+  current="$file"
+  refuse_writable_path "$option_name" "$current"
   refuse_writable_file "$option_name" "$current"
-  
-  while [ $step -lt $max_steps ]; do
-    # Get the symlink target (relative to the link's directory)
-    local target
-    target="$(readlink "$current")" || break  # Not a symlink, we're done
-    
-    # If target is absolute, use it as-is
-    # If relative, resolve relative to the link's directory
-    if [ "$target" != "${target#/}" ]; then
-      current="$target"
-    else
-      current="$(cd "$(dirname "$current")" && pwd -P)/$target"
-    fi
-    
-    # Check each intermediate hop
+  while [ "$step" -lt "$max_steps" ]; do
+    target="$(readlink "$current")" || break   # not a symlink: done
+    case "$target" in
+      /*) current="$target" ;;
+      *) current="$(cd "$(dirname "$current")" && pwd -P)/$target" ;;
+    esac
+    refuse_writable_path "$option_name" "$current"
     refuse_writable_file "$option_name" "$current"
-    
     step=$((step + 1))
   done
-  
-  # Normalize the final path to absolute and physical
-  local dir
-  dir="$(cd "$(dirname "$current")" && pwd -P)" || { echo "Cannot use $current." >&2; return 1; }
-  
-  if [ $step -ge $max_steps ]; then
+  if [ "$step" -ge "$max_steps" ] && [ -L "$current" ]; then
     echo "Symlink chain for $file is too long (more than $max_steps links)." >&2
     return 1
   fi
-  
+  dir="$(cd "$(dirname "$current")" && pwd -P)" || { echo "Cannot use $current." >&2; return 1; }
   echo "$dir/$(basename "$current")"
-  return 0
 }
 
 # The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
@@ -341,6 +335,14 @@ if [ -n "$CRED_FILE" ]; then
   # Validate each non-comment, non-blank line using awk for portability
   # awk prints validation errors to stdout (to be captured) and scopes to stdout on success
   _validation_output=$(awk '
+# an escape is a % that is not followed by two hex digits; user and token are checked on their own, so one cannot borrow from the other
+function bad_escape(s,   pos) {
+  for (pos = index(s, "%"); pos > 0; pos = index(s, "%")) {
+    if (substr(s, pos + 1, 2) !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) return 1
+    s = substr(s, pos + 3)
+  }
+  return 0
+}
 BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
 /^[[:space:]]*#|^[[:space:]]*$/ { next }
 {
@@ -357,20 +359,9 @@ BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
   user = substr(creds, 1, colon_pos - 1)
   token = substr(creds, colon_pos + 1)
   if (user == "" || token == "") { print "line " line_num ": user or token missing"; exit 1 }
-  if (index(user, "%") > 0 || index(token, "%") > 0) {
-    s = user token
-    pos = 1
-    while (pos <= length(s)) {
-      if (substr(s, pos, 1) == "%") {
-        if (pos + 2 > length(s)) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
-        hex = substr(s, pos + 1, 2)
-        if (hex !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
-        pos = pos + 3
-      } else {
-        pos = pos + 1
-      }
-    }
-  }
+  if (bad_escape(user) || bad_escape(token)) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
+  if (index(hostpath, "//") > 0) { print "line " line_num ": path must not contain //"; exit 1 }
+  if (substr(hostpath, length(hostpath)) == "/") { print "line " line_num ": path must not end in /"; exit 1 }
   slash_pos = index(hostpath, "/")
   if (slash_pos == 0) {
     host = hostpath
@@ -380,8 +371,6 @@ BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
     path = substr(hostpath, slash_pos + 1)
   }
   if (path != "" && substr(path, length(path) - 3) == ".git") { print "line " line_num ": path must not end in .git"; exit 1 }
-  if (path != "" && substr(path, length(path)) == "/") { print "line " line_num ": path must not end in /"; exit 1 }
-  if (index(path, "//") > 0) { print "line " line_num ": path must not contain //"; exit 1 }
   key = host ":" path
   if (index(" " seen " ", " " key " ") > 0) { print "line " line_num ": duplicate host+path"; exit 1 }
   seen = seen " " key
@@ -762,7 +751,7 @@ AGENT_ENV=()
 for _v in $A_ENV $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
 # Add git credentials environment variables if CRED_FILE is set
 if [ -n "$CRED_FILE" ]; then
-  AGENT_ENV+=(-e GIT_CONFIG_COUNT=2 -e GIT_CONFIG_KEY_0=credential.helper -e GIT_CONFIG_VALUE_0=/usr/local/bin/git-credential-agent-pod -e GIT_CONFIG_KEY_1=credential.useHttpPath -e GIT_CONFIG_VALUE_1=true)
+  AGENT_ENV+=(-e GIT_CONFIG_COUNT=3 -e GIT_CONFIG_KEY_0=credential.helper -e GIT_CONFIG_VALUE_0= -e GIT_CONFIG_KEY_1=credential.helper -e GIT_CONFIG_VALUE_1=/usr/local/bin/git-credential-agent-pod -e GIT_CONFIG_KEY_2=credential.useHttpPath -e GIT_CONFIG_VALUE_2=true)
 fi
 RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${DOCKER:+--name "$POD_NAME"} \

@@ -407,8 +407,43 @@ done <"$WORK/git-creds.out"
 # Check that the credentials file on the host is unchanged
 cmp -s "$CREDS_FILE" "$WORK/creds.before" && ok "the credentials file on the host is unchanged" || fail "the credentials file on the host is unchanged"
 
+# Test that credential.helper reset prevents store from writing to pod
+# Create a gitconfig with helper = store
+GITCONFIG_DIR="$(mktemp -d)"
+GITCONFIG_FILE="$GITCONFIG_DIR/gitconfig"
+printf '[credential]\n\thelper = store\n' > "$GITCONFIG_FILE"
+
+# Run a session with both credentials and gitconfig
+POD_SCRIPT_T1='
+# Test that store helper does not write to pod when our helper resets it first
+printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-T1\n\n" | git credential approve
+approve_rc=$?
+if [ "$approve_rc" = 0 ] && [ ! -f "$HOME/.git-credentials" ]; then
+  echo "STEP ok credential helper reset prevents store from writing to pod"
+else
+  echo "STEP FAIL credential helper reset prevents store from writing to pod"
+  echo "  approve exit code: $approve_rc"
+  echo "  .git-credentials exists: $[ -f "$HOME/.git-credentials" ]"
+  if [ -f "$HOME/.git-credentials" ]; then
+    echo "  contents:"
+    cat "$HOME/.git-credentials"
+  fi
+fi
+'
+
+run_launcher AGENT_POD_GIT_CREDENTIALS="$CREDS_FILE" AGENT_POD_GITCONFIG="$GITCONFIG_FILE" -- sh -c "$POD_SCRIPT_T1" sh >"$WORK/git-creds-t1.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "git credentials helper-reset session exits 0"; else fail "git credentials helper-reset session exits 0 (got $rc)"; tail -n 20 "$WORK/git-creds-t1.out" | indent; fi
+
+# Check the output for the expected STEP line
+while IFS= read -r line; do
+  case "$line" in
+    "STEP ok "*) ok "${line#STEP ok }" ;;
+    "STEP FAIL "*) fail "${line#STEP FAIL }" ;;
+  esac
+done <"$WORK/git-creds-t1.out"
+
 # Clean up
-rm -rf "$CREDS_DIR"
+rm -rf "$CREDS_DIR" "$GITCONFIG_DIR"
 
 section "nothing left behind"
 LEAKS=; SNAP_OK=

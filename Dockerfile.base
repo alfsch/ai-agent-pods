@@ -233,15 +233,94 @@ RUN chmod 755 /usr/local/bin/git-credential-agent-pod
 RUN cat > /usr/local/bin/gh <<'GH_WRAPPER_EOF'
 #!/bin/sh
 # gh wrapper for agent-pod: reads token from git-credential-agent-pod per call
-# If a token variable is already set, exec the real gh unchanged.
-# Otherwise, ask the helper for the host and pass the token to the real gh
-# in the variable gh reads for that host (GH_TOKEN for github.com and *.ghe.com,
-# GH_ENTERPRISE_TOKEN for other hosts).
+# The host is GH_HOST, else github.com. If a token that applies to it is already set (GH_TOKEN or GITHUB_TOKEN for github.com and
+# *.ghe.com, GH_ENTERPRISE_TOKEN or GITHUB_ENTERPRISE_TOKEN for other hosts), or there is no credentials file, run the real gh
+# unchanged. Otherwise ask the helper for the host and pass the token to the real gh, to it alone, in the variable gh reads for that host.
 
-# Check if any token is already set
-if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
-  exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
-fi
+# Decide the host first, then bypass lookup only when a token that applies to that host is set
+_host="${GH_HOST:-github.com}"
+
+# Check if a token that applies to this host is already set
+case "$_host" in
+  github.com|*.ghe.com)
+    if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;
+  *)
+    if [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;
+esac
+
+# A host chosen on the command line (--hostname, -R/--repo as HOST/OWNER/REPO, GH_REPO) must be the host the token was looked up for:
+# gh would send GH_TOKEN to any *.ghe.com host. Used only when the token comes from the credentials file.
+refuse_other_host() {
+  _explicit_host=""
+  _next_is_host=0
+  _explicit_host_from_hostname=0
+  for _arg in "$@"; do
+    if [ "$_next_is_host" = 1 ]; then
+      _explicit_host="$_arg"
+      _next_is_host=0
+      continue
+    fi
+    case "$_arg" in
+      --hostname=*) _explicit_host="${_arg#--hostname=}"; _explicit_host_from_hostname=1 ;;
+      --hostname) _next_is_host=1; _explicit_host_from_hostname=1 ;;
+      -R=*) _explicit_host="${_arg#-R=}" ;;
+      -R) _next_is_host=1 ;;
+      -R*) _explicit_host="${_arg#-R}" ;;
+      --repo=*) _explicit_host="${_arg#--repo=}" ;;
+      --repo) _next_is_host=1 ;;
+      --) break ;;
+    esac
+  done
+
+  # Also check GH_REPO environment variable
+  if [ -n "$_explicit_host" ]; then
+    # For -R/--repo: only extract host if value has format HOST/OWNER/REPO (3 parts, 2 slashes)
+    # If it's OWNER/REPO (2 parts, 1 slash), there's no host to extract
+    if [ "$_explicit_host_from_hostname" = 1 ]; then
+      # From --hostname, it's already just a host
+      : # keep _explicit_host as is
+    else
+      # From -R/--repo: check if it has at least 2 slashes (3 parts)
+      # Use parameter expansion to check: if removing first part leaves another slash, it's 3+ parts
+      _rest_after_first="${_explicit_host#*/}"
+      case "$_rest_after_first" in
+        */*)
+          # Has at least 2 slashes, so it's HOST/OWNER/REPO
+          _host_part="${_explicit_host%%/*}"
+          if [ -n "$_host_part" ]; then
+            _explicit_host="$_host_part"
+          fi
+          ;;
+        *)
+          # OWNER/REPO with no host, so clear it
+          _explicit_host=""
+          ;;
+      esac
+    fi
+  elif [ -n "${GH_REPO:-}" ]; then
+    # Same logic for GH_REPO: only extract host if it has 2+ slashes
+    _rest_after_first="${GH_REPO#*/}"
+    case "$_rest_after_first" in
+      */*)
+        _host_part="${GH_REPO%%/*}"
+        if [ -n "$_host_part" ]; then
+          _explicit_host="$_host_part"
+        fi
+        ;;
+    esac
+  fi
+
+  if [ -n "$_explicit_host" ] && [ "$_explicit_host" != "$_host" ]; then
+    printf 'gh: the command names host %s but the credential was looked up for %s; set GH_HOST=%s\n' "$_explicit_host" "$_host" "$_explicit_host" >&2
+    exit 1
+  fi
+}
 
 # Try to get credentials from the helper
 CRED_FILE="${AGENT_POD_CREDENTIALS_FILE:-/run/agent-pod/git-credentials}"
@@ -253,9 +332,9 @@ if [ -f "$CRED_FILE" ]; then
     printf 'gh: git-credential-agent-pod helper not found\n' >&2
     exit 1
   fi
+  refuse_other_host "$@"
   
   # Ask the helper directly for the host-level credential
-  _host="${GH_HOST:-github.com}"
   _output=$(
     AGENT_POD_CREDENTIALS_FILE="$CRED_FILE" git-credential-agent-pod get <<EOF
 protocol=https

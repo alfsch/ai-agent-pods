@@ -1318,6 +1318,31 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   launch -- true; [ "$RC" != 0 ] || fail "missing token was accepted"
   in_out 'line 1.*token'; not_in_out 'S3CRET-TOKEN'; not_logged '^run '
   
+  # validation - user ending in % is rejected (separate validation: % crosses boundary)
+  gc; printf 'https://u%%:41secret@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "user ending in % was accepted"
+  in_out 'line 1.*%'; not_in_out '41secret'; not_logged '^run '
+  
+  # validation - user ending in %4 is rejected (incomplete escape)
+  gc; printf 'https://u%%4:secret@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "user ending in %4 was accepted"
+  in_out 'line 1.*%'; not_in_out 'secret'; not_logged '^run '
+  
+  # validation - token ending in % is rejected
+  gc; printf 'https://u:secret%%@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "token ending in % was accepted"
+  in_out 'line 1.*%'; not_in_out 'secret'; not_logged '^run '
+  
+  # validation - user %41 is accepted (valid escape)
+  gc; printf 'https://%%41:S3CRET-TOKEN-T2D@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
+  # validation - token %2F is accepted (valid escape)
+  gc; printf 'https://u:S3CRET-TOKEN-T2E%%2F@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
   # validation: path ends in .git
   gc; printf 'https://u:S3CRET-TOKEN-0008@github.com/org/repo.git\n' > "$C/credentials"
   launch -- true; [ "$RC" != 0 ] || fail "path ending in .git was accepted"
@@ -1333,10 +1358,42 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   launch -- true; [ "$RC" != 0 ] || fail "path with // was accepted"
   in_out 'line 1.*//'; not_in_out 'S3CRET-TOKEN-0010'; not_logged '^run '
   
+  # validation - hostpath ending in / is rejected (unsplit check)
+  gc; printf 'https://u:S3CRET-TOKEN-T3A@github.com/\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "hostpath ending in / was accepted"
+  in_out 'line 1.*path must not end in /'; not_in_out 'S3CRET-TOKEN-T3A'; not_logged '^run '
+  
+  # validation - hostpath with // is rejected (unsplit check)
+  gc; printf 'https://u:S3CRET-TOKEN-T3B@github.com//org\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "hostpath with // was accepted"
+  in_out 'line 1.*//'; not_in_out 'S3CRET-TOKEN-T3B'; not_logged '^run '
+  
+  # validation - hostpath org/ ending in / is rejected
+  gc; printf 'https://u:S3CRET-TOKEN-T3C@github.com/org/\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "hostpath org/ ending in / was accepted"
+  in_out 'line 1.*path must not end in /'; not_in_out 'S3CRET-TOKEN-T3C'; not_logged '^run '
+  
+  # validation - hostpath org//repo with // is rejected
+  gc; printf 'https://u:S3CRET-TOKEN-T3D@github.com/org//repo\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "hostpath org//repo with // was accepted"
+  in_out 'line 1.*//'; not_in_out 'S3CRET-TOKEN-T3D'; not_logged '^run '
+  
+  # validation - github.com (no path) is accepted
+  gc; printf 'https://u:S3CRET-TOKEN-T3E@github.com\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
+  # validation - github.com/org is accepted
+  gc; printf 'https://u:S3CRET-TOKEN-T3F@github.com/org\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
+  # validation - github.com:8443/org/repo is accepted
+  gc; printf 'https://u:S3CRET-TOKEN-T3G@github.com:8443/org/repo\n' > "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "
+  
   # validation: same host plus path appears twice
-  gc; printf 'https://u:S3CRET-TOKEN-0011@github.com/org/repo\nhttps://u2:S3CRET-TOKEN-0012@github.com/org/repo\n' > "$C/credentials"
-  launch -- true; [ "$RC" != 0 ] || fail "duplicate host+path was accepted"
-  in_out 'line 2.*duplicate'; not_in_out 'S3CRET-TOKEN'; not_logged '^run '
   
   # validation: % not followed by two hex digits
   gc; printf 'https://u:S3CRET-TOKEN-0013%%@github.com\n' > "$C/credentials"
@@ -1346,7 +1403,7 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   # valid file passes
   gc; printf 'https://u:S3CRET-TOKEN-0014@github.com\n' > "$C/credentials"
   launch -- true; rc_is 0
-  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=2'
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=3'
   
   # validation: % not followed by two hex digits
   gc; printf 'https://u:S3CRET-TOKEN-0015%%@github.com\n' > "$C/credentials"
@@ -1361,7 +1418,7 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   # validation: % followed by two hex digits is valid
   gc; printf 'https://u:S3CRET-TOKEN-0017%%41@github.com\n' > "$C/credentials"
   launch -- true; rc_is 0
-  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=2'
+  logged " -v $C/credentials:/run/agent-pod/git-credentials:ro "; logged 'GIT_CONFIG_COUNT=3'
   
   # scopes message: host-only line, org line, repo line, one with port, and indented comment
   gc; printf 'https://u:S3CRET-TOKEN-0018@github.com\nhttps://u:S3CRET-TOKEN-0019@github.com/example-org\nhttps://u:S3CRET-TOKEN-0020@github.com/example-org/webapp\nhttps://u:S3CRET-TOKEN-0021@ghes.example.com:8443/team\n  # indented comment\n' > "$C/credentials"
@@ -1402,11 +1459,13 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   # Step E: GIT_CONFIG_* variables have exact values
   gc; printf 'https://u:S3CRET-TOKEN-0027@github.com\n' > "$C/credentials"
   launch -- true; rc_is 0
-  logged 'GIT_CONFIG_COUNT=2(\s|$)'
+  logged 'GIT_CONFIG_COUNT=3(\s|$)'
   logged 'GIT_CONFIG_KEY_0=credential\.helper(\s|$)'
-  logged 'GIT_CONFIG_VALUE_0=/usr/local/bin/git-credential-agent-pod(\s|$)'
-  logged 'GIT_CONFIG_KEY_1=credential\.useHttpPath(\s|$)'
-  logged 'GIT_CONFIG_VALUE_1=true(\s|$)'
+  logged 'GIT_CONFIG_VALUE_0=(\s|$)'
+  logged 'GIT_CONFIG_KEY_1=credential\.helper(\s|$)'
+  logged 'GIT_CONFIG_VALUE_1=/usr/local/bin/git-credential-agent-pod(\s|$)'
+  logged 'GIT_CONFIG_KEY_2=credential\.useHttpPath(\s|$)'
+  logged 'GIT_CONFIG_VALUE_2=true(\s|$)'
   
   # Step E: token never appears in docker run arguments
   gc; printf 'https://u:S3CRET-TOKEN-0028@github.com\n' > "$C/credentials"
@@ -1435,7 +1494,7 @@ FAKE_AWK
   in_out 'AGENT_POD_GIT_CREDENTIALS'
   not_logged '^run '
 
-  # FIX 2: unescaped @ in host is rejected
+  # unescaped @ in host is rejected
   gc; printf 'https://u:part1@part2@github.com\n' > "$C/credentials"
   launch -- true; [ "$RC" != 0 ] || fail "unescaped @ in host was accepted"
   in_out 'line 1: unescaped @ in the host; write @ in the user or token as %40'
@@ -1443,7 +1502,7 @@ FAKE_AWK
   not_in_out 'part2'
   not_logged '^run '
 
-  # FIX 1: relative path to file outside writable dirs is accepted and mounted with absolute path
+  # relative path to file outside writable dirs is accepted and mounted with absolute path
   gc; mkdir -p "$C" "$PROJ/../outside_dir"
   printf 'https://u:S3CRET-TOKEN-FIX1REL@github.com\n' > "$PROJ/../outside_dir/creds"
   launch AGENT_POD_GIT_CREDENTIALS=../outside_dir/creds -- true; rc_is 0
@@ -1452,14 +1511,14 @@ FAKE_AWK
   expected_path="$(cd "$PROJ/../outside_dir" && pwd -P)/creds"
   logged " -v $expected_path:/run/agent-pod/git-credentials:ro "
 
-  # FIX 1: file reached through symlinked directory is mounted by its real path
+  # file reached through symlinked directory is mounted by its real path
   gc; mkdir -p "$H/real_dir"
   printf 'https://u:S3CRET-TOKEN-FIX1SYMDIR@github.com\n' > "$H/real_dir/creds"
   ln -s "$H/real_dir" "$H/sym_dir"
   launch AGENT_POD_GIT_CREDENTIALS="$H/sym_dir/creds" -- true; rc_is 0
   logged " -v $PH/real_dir/creds:/run/agent-pod/git-credentials:ro "
 
-  # FIX 1: relative link target ../x into project is refused
+  # relative link target ../x into project is refused
   gc; mkdir -p "$C" "$H/parent_dir"
   printf 'https://u:S3CRET-TOKEN-FIX1RELLINK@github.com\n' > "$PROJ/creds"
   # Create a symlink in H/parent_dir that points to ../../my proj/creds (relative to H/parent_dir)
@@ -1469,7 +1528,7 @@ FAKE_AWK
   in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
   not_logged '^run '
 
-  # FIX 1: symlink pointing into project folder is refused
+  # symlink pointing into project folder is refused
   gc; mkdir -p "$C"
   printf 'https://u:S3CRET-TOKEN-FIX1A@github.com\n' > "$PROJ/creds"
   ln -s "$PROJ/creds" "$C/credentials"
@@ -1477,14 +1536,14 @@ FAKE_AWK
   in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
   not_logged '^run '
 
-  # FIX 1: symlink pointing outside all writable dirs is accepted
+  # symlink pointing outside all writable dirs is accepted
   gc; mkdir -p "$C"
   printf 'https://u:S3CRET-TOKEN-FIX1B@github.com\n' > "$H/outside_creds"
   ln -s "$H/outside_creds" "$C/credentials"
   launch -- true; rc_is 0
   logged " -v $PH/outside_creds:/run/agent-pod/git-credentials:ro "
 
-  # FIX 1: symlink chain of two links works
+  # symlink chain of two links works
   gc; mkdir -p "$C"
   printf 'https://u:S3CRET-TOKEN-FIX1C@github.com\n' > "$H/target_creds"
   ln -s "$H/target_creds" "$H/link1"
@@ -1492,7 +1551,7 @@ FAKE_AWK
   launch -- true; rc_is 0
   logged " -v $PH/target_creds:/run/agent-pod/git-credentials:ro "
 
-  # FIX 1: symlink loop is refused
+  # symlink loop is refused
   gc; mkdir -p "$C"
   # Create a chain of 21 symlinks (exceeds the 20 step limit)
   printf 'https://u:S3CRET-TOKEN-FIX1D@github.com\n' > "$C/real_creds"
@@ -1506,13 +1565,13 @@ FAKE_AWK
   in_out 'Symlink chain.*too long'
   not_logged '^run '
 
-  # S3: symlink chain security - check each hop
+  # symlink chain security - check each hop
   # (a) a link in the config dir pointing to a link in the project that points to a host file outside is REFUSED (the middle hop is writable)
   gc; mkdir -p "$C" "$PROJ"
   printf 'https://u:S3CRET-TOKEN-S3A@github.com\n' > "$H/outside_host_creds"
   ln -s "$H/outside_host_creds" "$PROJ/middle_link"
   ln -s "$PROJ/middle_link" "$C/credentials"
-  launch -- true; [ "$RC" != 0 ] || fail "S3a: symlink chain with writable middle hop was accepted"
+  launch -- true; [ "$RC" != 0 ] || fail "symlink chain with writable middle hop was accepted"
   in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
   not_logged '^run '
 
@@ -1520,7 +1579,7 @@ FAKE_AWK
   gc; mkdir -p "$PROJ"
   printf 'https://u:S3CRET-TOKEN-S3B@github.com\n' > "$H/safe_creds"
   ln -s "$H/safe_creds" "$PROJ/link_to_safe"
-  launch AGENT_POD_GIT_CREDENTIALS="$PROJ/link_to_safe" -- true; [ "$RC" != 0 ] || fail "S3b: original path in writable dir was accepted"
+  launch AGENT_POD_GIT_CREDENTIALS="$PROJ/link_to_safe" -- true; [ "$RC" != 0 ] || fail "original path in writable dir was accepted"
   in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
   not_logged '^run '
 
@@ -1531,10 +1590,51 @@ FAKE_AWK
   ln -s "$C/trusted2/link1" "$C/credentials"
   launch -- true; rc_is 0
   logged " -v $C/trusted1/target_creds:/run/agent-pod/git-credentials:ro "
+  
+  # a path through a symlinked directory in the project: the directory it leads to is safe, but the pod can retarget the link
+  gc; mkdir -p "$PROJ" "$H/outside_dir"
+  printf 'https://u:S3CRET-TOKEN-PIVOT@github.com\n' > "$H/outside_dir/credentials"
+  ln -s "$H/outside_dir" "$PROJ/pivot"
+  launch AGENT_POD_GIT_CREDENTIALS="$PROJ/pivot/credentials" -- true; [ "$RC" != 0 ] || fail "a credentials path through a symlinked directory in the project was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # the same through a hop: the original link is in the config dir, and so is safe, but it leads through a pivot in the project
+  gc; mkdir -p "$C" "$PROJ" "$H/outside_dir"
+  printf 'https://u:S3CRET-TOKEN-HOPPIVOT@github.com\n' > "$H/outside_dir/creds"
+  ln -s "$H/outside_dir" "$PROJ/pivot"
+  ln -s "$PROJ/pivot/creds" "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "a credentials link that leads through a symlinked directory in the project was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # a credentials file that is a link in the project, to a file outside
+  gc; mkdir -p "$PROJ" "$H/outside_dir"
+  printf 'https://u:S3CRET-TOKEN-FILELINK@github.com\n' > "$H/outside_dir/credentials"
+  ln -s "$H/outside_dir/credentials" "$PROJ/cred_link"
+  launch AGENT_POD_GIT_CREDENTIALS="$PROJ/cred_link" -- true; [ "$RC" != 0 ] || fail "a credentials file that is a symlink in the project was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # a link to a directory inside ~/.config/agent-pod (trusted) -> accepted
+  # The link is in a trusted location, and the target is also trusted
+  gc; mkdir -p "$C/trusted_dir"
+  printf 'https://u:S3CRET-TOKEN-T7B@github.com\n' > "$C/trusted_dir/creds"
+  ln -s "$C/trusted_dir" "$C/link_to_trusted"
+  launch AGENT_POD_GIT_CREDENTIALS="$C/link_to_trusted/creds" -- true; rc_is 0
+  logged " -v $PH/config/agent-pod/trusted_dir/creds:/run/agent-pod/git-credentials:ro "
+  
+  # '..' in the path still works for a normal file
+  gc; mkdir -p "$C/subdir"
+  printf 'https://u:S3CRET-TOKEN-T7C@github.com\n' > "$C/subdir/creds"
+  launch AGENT_POD_GIT_CREDENTIALS="$C/subdir/../subdir/creds" -- true; rc_is 0
+  logged " -v $PH/config/agent-pod/subdir/creds:/run/agent-pod/git-credentials:ro "
 
 }
 
 test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helper per call
+  # clear inherited token variables to prevent leaks
+  unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN GH_HOST GH_REPO
   local script wrapper helper fixture fake_gh
   script="$(sed -n '/^RUN cat > \/usr\/local\/bin\/gh /,/^GH_WRAPPER_EOF$/p' "$DOCKERFILE_BASE" | sed '1d;$d')"
   [ -n "$script" ] || fail "gh wrapper script not found in $DOCKERFILE_BASE"
@@ -1640,6 +1740,108 @@ test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helpe
   PATH="/nonexistent" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 1
   grep 'gh: git-credential-agent-pod helper not found' "$CASE/err" || fail "expected helper not found error"
+  
+  # Test (a) GH_TOKEN set + GH_HOST=ghes.example.com + file entry for ghes -> gets GH_ENTERPRISE_TOKEN from file
+  printf 'https://user:S3CRET-TOKEN-T5A@ghes.example.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_TOKEN=synthetic-github-token GH_HOST=ghes.example.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_ENTERPRISE_TOKEN=S3CRET-TOKEN-T5A$' "$CASE/out" || fail "expected GH_ENTERPRISE_TOKEN from file for ghes.example.com"
+  
+  # Test (b) GH_ENTERPRISE_TOKEN set + github.com -> gets GH_TOKEN from file
+  printf 'https://user:S3CRET-TOKEN-T5B@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_ENTERPRISE_TOKEN=synthetic-enterprise-token "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-T5B$' "$CASE/out" || fail "expected GH_TOKEN from file for github.com"
+  
+  # Test (c) GH_TOKEN set + github.com -> unchanged (bypass)
+  printf 'https://user:S3CRET-TOKEN-T5C@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_TOKEN=synthetic-github-token "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=synthetic-github-token$' "$CASE/out" || fail "expected inherited GH_TOKEN for github.com"
+  
+  # Test (d) GH_ENTERPRISE_TOKEN set + ghes host -> unchanged
+  printf 'https://user:S3CRET-TOKEN-T5D@ghes.example.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_ENTERPRISE_TOKEN=synthetic-enterprise-token GH_HOST=ghes.example.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_ENTERPRISE_TOKEN=synthetic-enterprise-token$' "$CASE/out" || fail "expected inherited GH_ENTERPRISE_TOKEN for ghes.example.com"
+  
+  # GH_TOKEN applies to *.ghe.com too: set + GH_HOST=other.ghe.com -> the inherited token is kept, the file is not asked
+  printf 'https://user:S3CRET-TOKEN-T5E@other.ghe.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_TOKEN=synthetic-github-token GH_HOST=other.ghe.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=synthetic-github-token$' "$CASE/out" || fail "expected the inherited GH_TOKEN for other.ghe.com"
+  
+  # Test (f) GH_ENTERPRISE_TOKEN set + GH_HOST=other.ghe.com -> gets GH_TOKEN from file (family 1 takes precedence)
+  printf 'https://user:S3CRET-TOKEN-T5F@other.ghe.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_ENTERPRISE_TOKEN=synthetic-enterprise-token GH_HOST=other.ghe.com "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-T5F$' "$CASE/out" || fail "expected GH_TOKEN from file for other.ghe.com even with GH_ENTERPRISE_TOKEN set"
+  
+  # Test --hostname with the same host passes
+  printf 'https://user:S3CRET-TOKEN-T6A@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" --hostname github.com repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-T6A$' "$CASE/out" || fail "expected token for same host with --hostname"
+  
+  # Test --hostname with another host -> exit 1 and fake gh is NOT run
+  printf 'https://user:S3CRET-TOKEN-T6B@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" --hostname other.ghe.com repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with --hostname"
+  ! grep '^FAKE_GH' "$CASE/out" || fail "fake gh should NOT have been run"
+  
+  # Test -R with different host -> refused
+  printf 'https://user:S3CRET-TOKEN-T6C@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" -R other.ghe.com/o/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with -R"
+  
+  # Test -R with no host (two-part value) -> passes
+  printf 'https://user:S3CRET-TOKEN-T6D@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" -R o/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-T6D$' "$CASE/out" || fail "expected token for same host with -R o/r"
+  
+  # Test --repo=other.ghe.com/o/r -> refused
+  printf 'https://user:S3CRET-TOKEN-T6E@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" --repo=other.ghe.com/o/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with --repo="
+  
+  # Test --hostname=other.ghe.com (attached = form) -> refused
+  printf 'https://user:S3CRET-TOKEN-T6F@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" --hostname=other.ghe.com repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with --hostname="
+  
+  # Test -R=other.ghe.com/o/r (attached = form) -> refused
+  printf 'https://user:S3CRET-TOKEN-T6G@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" -R=other.ghe.com/o/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with -R="
+  
+  # Test -Rother.ghe.com/o/r (attached form) -> refused
+  printf 'https://user:S3CRET-TOKEN-T6H@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" -Rother.ghe.com/o/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with -R (attached)"
+  
+  # Test -Ro/r (attached form, no host) -> passes
+  printf 'https://user:S3CRET-TOKEN-T6I@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" -Ro/r repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-T6I$' "$CASE/out" || fail "expected token for same host with -R (attached, no host)"
+  
+  # Test GH_REPO=other.ghe.com/o/r -> refused
+  printf 'https://user:S3CRET-TOKEN-T6J@github.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_REPO=other.ghe.com/o/r "$wrapper" repo list > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for different host with GH_REPO"
+
+  # without a credentials file the wrapper is not in the way: a host named on the command line is gh's own business
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$CASE/no-such-file" "$wrapper" api --hostname other.ghe.com user > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^\[arg\] other.ghe.com$' "$CASE/out" || fail "gh was not run with the host named on the command line when there is no credentials file"
 }
 
 test_publish_signs_created_digest() {   # the workflow signs the digest of the manifest it created, never what the tag points at later
@@ -2052,11 +2254,51 @@ run_mutants() {
   mutate test_git_credential_helper 'urldecode(substr(creds' 'substr(creds' Dockerfile.base || rc=1
   mutate test_git_credential_helper 'if ((hex1 ~ /[0-9A-Fa-f]/) && (hex2 ~ /[0-9A-Fa-f]/))' 'if (1)' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"' 'GH_TOKEN="$_password"; exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"' Dockerfile.base || rc=1
-  mutate test_gh_wrapper 'if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then' 'if false; then' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'case "$_host" in' 'if false; then' Dockerfile.base || rc=1
   mutate test_gh_wrapper '_host="${GH_HOST:-github.com}"' '_host="github.com"' Dockerfile.base || rc=1
-  mutate test_gh_wrapper 'github.com|*.ghe.com)' 'github.com)' Dockerfile.base || rc=1
+  # mutant - swap to bypass on any variable (first case)
+  mutate test_gh_wrapper '  github.com|*.ghe.com)
+    if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi' '  github.com)
+    if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'GH_ENTERPRISE_TOKEN="$_password" exec' 'GH_TOKEN="$_password" exec' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'if ! command -v git-credential-agent-pod >/dev/null 2>&1; then' 'if false; then' Dockerfile.base || rc=1
+  # mutant - bypass on any variable (replace case with if)
+  mutate test_gh_wrapper 'case "$_host" in
+  github.com|*.ghe.com)
+    if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;
+  *)
+    if [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;' 'if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ] || [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+  exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+fi' Dockerfile.base || rc=1
+  # mutant - swap variable families (second case)
+  mutate test_gh_wrapper '  *)
+    if [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;' '  github.com|*.ghe.com)
+    if [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;' Dockerfile.base || rc=1
+  # the selector check belongs to the lookup path: before the file check it would refuse gh for everyone without a credentials file
+  mutate test_gh_wrapper 'if [ -f "$CRED_FILE" ]; then' $'refuse_other_host "$@"\nif [ -f "$CRED_FILE" ]; then' Dockerfile.base || rc=1
+  # mutants for explicit host selector check
+  mutate test_gh_wrapper 'if [ -n "$_explicit_host" ] && [ "$_explicit_host" != "$_host" ]; then' 'if false; then' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '--hostname=*) _explicit_host="${_arg#--hostname=}"; _explicit_host_from_hostname=1' '--hostname=*) :' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '-R=*) _explicit_host="${_arg#-R=}"' '-R=*) :' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '-R) _next_is_host=1' '-R) :' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '-R*) _explicit_host="${_arg#-R}"' '-R*) :' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '--repo=*) _explicit_host="${_arg#--repo=}"' '--repo=*) :' Dockerfile.base || rc=1
   mutate test_git_credentials 'if [ -n "${AGENT_POD_GIT_CREDENTIALS:-}" ]; then' 'if false; then' agent-pod || rc=1
   mutate test_git_credentials 'elif [ -f "$A_CFG_HOME/$A_KEY.credentials" ]; then CRED_FILE="$A_CFG_HOME/$A_KEY.credentials"' 'elif false; then' agent-pod || rc=1
   mutate test_git_credentials 'elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT.credentials"' 'elif false; then' agent-pod || rc=1
@@ -2065,11 +2307,11 @@ run_mutants() {
   mutate test_git_credentials 'if (at_pos == 0)' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (colon_pos == 0)' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (user == "" || token == "")' 'if (1)' agent-pod || rc=1
-  mutate test_git_credentials 'if (pos + 2 > length(s))' 'if (1)' agent-pod || rc=1
-  mutate test_git_credentials 'if (hex !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/)' 'if (1)' agent-pod || rc=1
+
+  mutate test_git_credentials 'if (substr(s, pos + 1, 2) !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) return 1' 'if (1) return 1' agent-pod || rc=1
   mutate test_git_credentials 'if (path != "" && substr(path, length(path) - 3) == ".git")' 'if (1)' agent-pod || rc=1
-  mutate test_git_credentials 'if (path != "" && substr(path, length(path)) == "/")' 'if (1)' agent-pod || rc=1
-  mutate test_git_credentials 'if (index(path, "//") > 0)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (substr(hostpath, length(hostpath)) == "/")' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (index(hostpath, "//") > 0)' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (index(hostpath, "@") > 0)' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (index(" " seen " ", " " key " ") > 0)' 'if (1)' agent-pod || rc=1
   # Mutants for scopes message
@@ -2084,17 +2326,30 @@ run_mutants() {
   mutate test_git_credentials 'CRED_FILE="$_cred_file"' ':' agent-pod || rc=1
   mutate test_git_credentials 'echo "Symlink chain for' ':' agent-pod || rc=1
   mutate test_git_credentials 'echo "$dir/$(basename "$current")"' 'echo "$current"' agent-pod || rc=1
-  # Mutants for per-hop check in resolve_symlink_chain
-  mutate test_git_credentials 'refuse_writable_file "$option_name" "$current"' 'true' agent-pod || rc=1
-  mutate test_git_credentials $'    # Check each intermediate hop\n    refuse_writable_file "$option_name" "$current"' '    # Check each intermediate hop' agent-pod || rc=1
+  # the guards of resolve_symlink_chain: each of the four calls (original path, hop; the directory walk, the file guard) must be needed
+  mutate test_git_credentials $'\n  refuse_writable_path "$option_name" "$current"\n' $'\n' agent-pod || rc=1
+  mutate test_git_credentials $'\n  refuse_writable_file "$option_name" "$current"\n' $'\n' agent-pod || rc=1
+  mutate test_git_credentials $'    refuse_writable_path "$option_name" "$current"\n' '' agent-pod || rc=1
+  mutate test_git_credentials $'    refuse_writable_file "$option_name" "$current"\n' '' agent-pod || rc=1
+  mutate test_git_credentials 'if [ -L "$p" ]; then refuse_writable_file "$label" "$p"; fi' ':' agent-pod || rc=1
   # Mutants for Step E: mount
   mutate test_git_credentials 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")' 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials")' agent-pod || rc=1
+  # user and token are checked on their own: joined, an incomplete escape at the end of the user borrows from the token
+  mutate test_git_credentials 'bad_escape(user) || bad_escape(token)' 'bad_escape(user token)' agent-pod || rc=1
+  mutate test_git_credentials 'bad_escape(user) || bad_escape(token)' 'bad_escape(token)' agent-pod || rc=1
+  mutate test_git_credentials 'bad_escape(user) || bad_escape(token)' 'bad_escape(user)' agent-pod || rc=1
+  mutate test_git_credentials 'if (substr(s, pos + 1, 2) !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) return 1' 'if (0) return 1' agent-pod || rc=1
+  # a slash that the split of host and path would hide
+  mutate test_git_credentials 'if (index(hostpath, "//") > 0)' 'if (0)' agent-pod || rc=1
+  mutate test_git_credentials 'if (substr(hostpath, length(hostpath)) == "/")' 'if (0)' agent-pod || rc=1
+
   # Mutants for Step E: GIT_CONFIG variables
-  mutate test_git_credentials 'GIT_CONFIG_COUNT=2' 'GIT_CONFIG_COUNT=1' agent-pod || rc=1
+  mutate test_git_credentials 'GIT_CONFIG_COUNT=3' 'GIT_CONFIG_COUNT=2' agent-pod || rc=1
+  mutate test_git_credentials 'GIT_CONFIG_VALUE_0=' 'GIT_CONFIG_VALUE_0=/usr/local/bin/git-credential-agent-pod' agent-pod || rc=1
   mutate test_git_credentials 'credential.helper' 'credential.helper2' agent-pod || rc=1
   mutate test_git_credentials '/usr/local/bin/git-credential-agent-pod' '/usr/bin/git-credential-agent-pod' agent-pod || rc=1
   mutate test_git_credentials 'credential.useHttpPath' 'credential.useHttpPath2' agent-pod || rc=1
-  mutate test_git_credentials 'GIT_CONFIG_VALUE_1=true' 'GIT_CONFIG_VALUE_1=false' agent-pod || rc=1
+  mutate test_git_credentials 'GIT_CONFIG_VALUE_2=true' 'GIT_CONFIG_VALUE_2=false' agent-pod || rc=1
   mutate test_git_identity  '${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"}' '' || rc=1
   mutate test_git_identity  '  _g="$_gd/$(basename "$_g")"' '  :' || rc=1
   mutate test_git_identity  '_writable=("$PWD" "$A_STATE_DIR");' '_writable=("$A_STATE_DIR");' || rc=1
