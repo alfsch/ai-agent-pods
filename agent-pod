@@ -247,6 +247,43 @@ refuse_writable_file() {
   done
 }
 
+# Resolve symlinks for a file, following at most 20 links
+# Echoes the final target path to stdout, or echoes error to stderr and returns 1 on loop
+resolve_symlink_chain() {
+  local file="$1"
+  local max_steps=20
+  local step=0
+  local current="$file"
+  
+  while [ $step -lt $max_steps ]; do
+    # Get the symlink target (relative to the link's directory)
+    local target
+    target="$(readlink "$current")" || break  # Not a symlink, we're done
+    
+    # If target is absolute, use it as-is
+    # If relative, resolve relative to the link's directory
+    if [ "$target" != "${target#/}" ]; then
+      current="$target"
+    else
+      current="$(cd "$(dirname "$current")" && pwd -P)/$target"
+    fi
+    
+    step=$((step + 1))
+  done
+  
+  # Normalize the final path to absolute and physical
+  local dir
+  dir="$(cd "$(dirname "$current")" && pwd -P)" || { echo "Cannot use $current." >&2; return 1; }
+  
+  if [ $step -ge $max_steps ]; then
+    echo "Symlink chain for $file is too long (more than $max_steps links)." >&2
+    return 1
+  fi
+  
+  echo "$dir/$(basename "$current")"
+  return 0
+}
+
 # The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
 # thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
 # commit as another identity); else <agent>-<profile>.gitconfig (with a profile), else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
@@ -289,10 +326,11 @@ elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT
 elif [ -f "$A_CFG_HOME/credentials" ]; then CRED_FILE="$A_CFG_HOME/credentials"
 fi
 if [ -n "$CRED_FILE" ]; then
-  # Validate the file
-  _cred_dir="$(cd "$(dirname "$CRED_FILE")" && pwd -P)" || die "Cannot use $CRED_FILE."
-  _cred_file="$_cred_dir/$(basename "$CRED_FILE")"
+  # Validate the file - follow symlink chain to get the final target
+  _cred_file="$CRED_FILE"
+  _cred_file="$(resolve_symlink_chain "$_cred_file")" 2>&1 || die "Cannot resolve symlinks for $CRED_FILE."
   refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"
+  CRED_FILE="$_cred_file"
   
   # Validate each non-comment, non-blank line using awk for portability
   # awk prints validation errors to stdout (to be captured) and scopes to stdout on success
@@ -307,6 +345,7 @@ BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
   if (at_pos == 0) { print "line " line_num ": missing @"; exit 1 }
   creds = substr(rest, 1, at_pos - 1)
   hostpath = substr(rest, at_pos + 1)
+  if (index(hostpath, "@") > 0) { print "line " line_num ": unescaped @ in the host; write @ in the user or token as %40"; exit 1 }
   colon_pos = index(creds, ":")
   if (colon_pos == 0) { print "line " line_num ": user or token missing"; exit 1 }
   user = substr(creds, 1, colon_pos - 1)
@@ -358,7 +397,6 @@ END {
   fi
   _scopes="$_validation_output"
   
-  CRED_FILE="$_cred_dir/$(basename "$CRED_FILE")"
   CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")
   # Print scopes on stderr
   if [ -n "$_scopes" ]; then

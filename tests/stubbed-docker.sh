@@ -1383,8 +1383,8 @@ test_git_credentials() {   # git credentials file lookup and validation in the l
   not_logged '^run '
   
   # Step E: guard refuses agent state dir
-  gc; mkdir -p "$H/.claude-pod"; printf 'https://u:S3CRET-TOKEN-0024@github.com\n' > "$H/.claude-pod/credentials"
-  launch AGENT_POD_GIT_CREDENTIALS="$H/.claude-pod/credentials" -- true; [ "$RC" != 0 ] || fail "writable credentials file in state dir was accepted"
+  gc; mkdir -p "$H/.${AGENT:-claude}-pod"; printf 'https://u:S3CRET-TOKEN-0024@github.com\n' > "$H/.${AGENT:-claude}-pod/credentials"
+  launch AGENT_POD_GIT_CREDENTIALS="$H/.${AGENT:-claude}-pod/credentials" -- true; [ "$RC" != 0 ] || fail "writable credentials file in state dir was accepted"
   in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
   not_logged '^run '
   
@@ -1433,6 +1433,77 @@ FAKE_AWK
   launch -- true; [ "$RC" != 0 ] || fail "awk exit 2 was accepted"
   export PATH="$OLD_PATH"
   in_out 'AGENT_POD_GIT_CREDENTIALS'
+  not_logged '^run '
+
+  # FIX 2: unescaped @ in host is rejected
+  gc; printf 'https://u:part1@part2@github.com\n' > "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "unescaped @ in host was accepted"
+  in_out 'line 1: unescaped @ in the host; write @ in the user or token as %40'
+  not_in_out 'part1'
+  not_in_out 'part2'
+  not_logged '^run '
+
+  # FIX 1: relative path to file outside writable dirs is accepted and mounted with absolute path
+  gc; mkdir -p "$C" "$PROJ/../outside_dir"
+  printf 'https://u:S3CRET-TOKEN-FIX1REL@github.com\n' > "$PROJ/../outside_dir/creds"
+  launch AGENT_POD_GIT_CREDENTIALS=../outside_dir/creds -- true; rc_is 0
+  # The path should be normalized to absolute
+  local expected_path
+  expected_path="$(cd "$PROJ/../outside_dir" && pwd -P)/creds"
+  logged " -v $expected_path:/run/agent-pod/git-credentials:ro "
+
+  # FIX 1: file reached through symlinked directory is mounted by its real path
+  gc; mkdir -p "$H/real_dir"
+  printf 'https://u:S3CRET-TOKEN-FIX1SYMDIR@github.com\n' > "$H/real_dir/creds"
+  ln -s "$H/real_dir" "$H/sym_dir"
+  launch AGENT_POD_GIT_CREDENTIALS="$H/sym_dir/creds" -- true; rc_is 0
+  logged " -v $H/real_dir/creds:/run/agent-pod/git-credentials:ro "
+
+  # FIX 1: relative link target ../x into project is refused
+  gc; mkdir -p "$C" "$H/parent_dir"
+  printf 'https://u:S3CRET-TOKEN-FIX1RELLINK@github.com\n' > "$PROJ/creds"
+  # Create a symlink in H/parent_dir that points to ../../my proj/creds (relative to H/parent_dir)
+  # H is CASE/home dir, PROJ is CASE/my proj, so ../../my proj from H/parent_dir = CASE/my proj = PROJ
+  ln -s "../../my proj/creds" "$H/parent_dir/link_to_proj"
+  launch AGENT_POD_GIT_CREDENTIALS="$H/parent_dir/link_to_proj" -- true; [ "$RC" != 0 ] || fail "relative link into project was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # FIX 1: symlink pointing into project folder is refused
+  gc; mkdir -p "$C"
+  printf 'https://u:S3CRET-TOKEN-FIX1A@github.com\n' > "$PROJ/creds"
+  ln -s "$PROJ/creds" "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "symlink to project folder was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # FIX 1: symlink pointing outside all writable dirs is accepted
+  gc; mkdir -p "$C"
+  printf 'https://u:S3CRET-TOKEN-FIX1B@github.com\n' > "$H/outside_creds"
+  ln -s "$H/outside_creds" "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $H/outside_creds:/run/agent-pod/git-credentials:ro "
+
+  # FIX 1: symlink chain of two links works
+  gc; mkdir -p "$C"
+  printf 'https://u:S3CRET-TOKEN-FIX1C@github.com\n' > "$H/target_creds"
+  ln -s "$H/target_creds" "$H/link1"
+  ln -s "$H/link1" "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $H/target_creds:/run/agent-pod/git-credentials:ro "
+
+  # FIX 1: symlink loop is refused
+  gc; mkdir -p "$C"
+  # Create a chain of 21 symlinks (exceeds the 20 step limit)
+  printf 'https://u:S3CRET-TOKEN-FIX1D@github.com\n' > "$C/real_creds"
+  _prev="$C/real_creds"
+  for i in $(seq 1 21); do
+    ln -s "$_prev" "$C/link_$i"
+    _prev="$C/link_$i"
+  done
+  ln -s "$_prev" "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "symlink loop was accepted"
+  in_out 'Symlink chain.*too long'
   not_logged '^run '
 
 }
@@ -1973,6 +2044,7 @@ run_mutants() {
   mutate test_git_credentials 'if (path != "" && substr(path, length(path) - 3) == ".git")' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (path != "" && substr(path, length(path)) == "/")' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (index(path, "//") > 0)' 'if (1)' agent-pod || rc=1
+  mutate test_git_credentials 'if (index(hostpath, "@") > 0)' 'if (1)' agent-pod || rc=1
   mutate test_git_credentials 'if (index(" " seen " ", " " key " ") > 0)' 'if (1)' agent-pod || rc=1
   # Mutants for scopes message
   mutate test_git_credentials 'printf "%s", host;' 'printf "%s", user;' agent-pod || rc=1
@@ -1984,6 +2056,12 @@ run_mutants() {
   mutate test_git_credentials 'if [ $_validation_rc -ne 0 ]; then' 'if false; then' agent-pod || rc=1
   # Mutants for Step E: guard
   mutate test_git_credentials 'refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"' 'true' agent-pod || rc=1
+  # FIX 1 mutants
+  mutate test_git_credentials 'resolve_symlink_chain "$_cred_file"' ':' agent-pod || rc=1
+  mutate test_git_credentials '_cred_file="$(resolve_symlink_chain "$_cred_file")" 2>&1' '_cred_file="$_cred_file"' agent-pod || rc=1
+  mutate test_git_credentials 'CRED_FILE="$_cred_file"' ':' agent-pod || rc=1
+  mutate test_git_credentials 'echo "Symlink chain for' ':' agent-pod || rc=1
+  mutate test_git_credentials 'echo "$dir/$(basename "$current")"' 'echo "$current"' agent-pod || rc=1
   # Mutants for Step E: mount
   mutate test_git_credentials 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")' 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials")' agent-pod || rc=1
   # Mutants for Step E: GIT_CONFIG variables

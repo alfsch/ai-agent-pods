@@ -318,35 +318,52 @@ for host in github.com gitlab.com git.example.com:8443; do
     git.example.com:8443) expected_user="test-user3" expected_pass="S3CRET-TOKEN-0003" ;;
     *) expected_user="test-user" expected_pass="S3CRET-TOKEN-0001" ;;
   esac
-  result=$(printf "protocol=https\nhost=%s\n\n" "$host" | /usr/local/bin/git-credential-agent-pod get)
+  result=$(printf "protocol=https\nhost=%s\n\n" "$host" | GIT_TERMINAL_PROMPT=0 git credential fill)
+  fill_rc=$?
   expected="username=$expected_user
 password=$expected_pass"
-  if [ "$result" = "$expected" ]; then
+  if [ "$result" = "$expected" ] && [ "$fill_rc" = 0 ]; then
     echo "STEP ok git credential fill returns correct user and password for $host"
   else
     echo "STEP FAIL git credential fill returns correct user and password for $host"
     echo "  expected: $expected"
     echo "  got: $result"
+    echo "  exit code: $fill_rc"
   fi
 done
 
-# Test unknown host returns nothing and exits 0
-result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | /usr/local/bin/git-credential-agent-pod get)
-if [ -z "$result" ]; then
-  echo "STEP ok unknown host returns nothing"
+# Test unknown host with git credential fill exits non-zero and prints no password
+result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill)
+fill_rc=$?
+if [ "$fill_rc" != 0 ] && ! echo "$result" | grep -q "^password="; then
+  echo "STEP ok unknown host fill exits non-zero with no password"
 else
-  echo "STEP FAIL unknown host returns nothing"
+  echo "STEP FAIL unknown host fill exits non-zero with no password"
+  echo "  exit code: $fill_rc"
   echo "  got: $result"
 fi
 
-# Test store and erase leave the file byte-identical
-cp /run/agent-pod/git-credentials /tmp/creds-backup
-printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-0001\n\n" | git credential store
-printf "protocol=https\nhost=github.com\n\n" | git credential erase
-if cmp -s /run/agent-pod/git-credentials /tmp/creds-backup; then
-  echo "STEP ok store and erase leave the credentials file byte-identical"
+# Keep ONE direct helper call for the unknown host (prints nothing, exit 0)
+result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | /usr/local/bin/git-credential-agent-pod get)
+if [ -z "$result" ]; then
+  echo "STEP ok unknown host helper returns nothing"
 else
-  echo "STEP FAIL store and erase leave the credentials file byte-identical"
+  echo "STEP FAIL unknown host helper returns nothing"
+  echo "  got: $result"
+fi
+
+# Test approve and reject leave the file byte-identical
+cp /run/agent-pod/git-credentials /tmp/creds-backup
+printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-0001\n\n" | git credential approve
+approve_rc=$?
+printf "protocol=https\nhost=github.com\n\n" | git credential reject
+reject_rc=$?
+if [ "$approve_rc" = 0 ] && [ "$reject_rc" = 0 ] && cmp -s /run/agent-pod/git-credentials /tmp/creds-backup; then
+  echo "STEP ok approve and reject leave the credentials file byte-identical"
+else
+  echo "STEP FAIL approve and reject leave the credentials file byte-identical"
+  echo "  approve exit code: $approve_rc"
+  echo "  reject exit code: $reject_rc"
 fi
 rm -f /tmp/creds-backup
 
@@ -380,7 +397,7 @@ while IFS= read -r line; do
     "STEP FAIL "*) fail "${line#STEP FAIL }"; session_failed=1 ;;
   esac
 done <"$WORK/git-creds.out"
-[ "$(grep -c '^STEP ok ' "$WORK/git-creds.out")" -eq 7 ] || { fail "git credentials session ran all its steps"; session_failed=1; }
+[ "$(grep -c '^STEP ok ' "$WORK/git-creds.out")" -eq 8 ] || { fail "git credentials session ran all its steps"; session_failed=1; }
 [ -z "$session_failed" ] || { echo "  session output:"; tail -n 60 "$WORK/git-creds.out" | indent; }
 
 # Check that the credentials file on the host is unchanged
