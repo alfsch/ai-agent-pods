@@ -275,8 +275,9 @@ check_host() {   # <kind> <value>: refuse a value that names another host than $
 }
 refuse_other_host() {
   _next=
+  _prev=
   for _arg in "$@"; do
-    if [ -n "$_next" ]; then check_host "$_next" "$_arg"; _next=; continue; fi
+    if [ -n "$_next" ]; then check_host "$_next" "$_arg"; _next=; _prev="$_arg"; continue; fi
     case "$_arg" in
       --hostname=*) check_host host "${_arg#--hostname=}" ;;
       --hostname) _next=host ;;
@@ -285,9 +286,11 @@ refuse_other_host() {
       -R*) check_host repo "${_arg#-R}" ;;
       --repo=*) check_host repo "${_arg#--repo=}" ;;
       --repo) _next=repo ;;
-      http://*|https://*) check_host url "$_arg" ;;
+      http://*|https://*)   # a URL is a selector as an argument of its own, not as the value of an option (--body, --homepage)
+        case "$_prev" in -*) ;; *) check_host url "$_arg" ;; esac ;;
       --) break ;;
     esac
+    _prev="$_arg"
   done
   if [ -n "${GH_REPO:-}" ]; then check_host repo "$GH_REPO"; fi
 }
