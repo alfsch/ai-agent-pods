@@ -304,7 +304,7 @@ check "the current project's cache is kept" sd volume inspect "$CACHE_VOL"
 
 section "git credentials"
 # Create a credentials file outside the project with fake tokens
-CREDS_DIR="$(mktemp -d)"
+CREDS_DIR="$(mktemp -d "$WORK/credentials.XXXXXX")"
 CREDS_FILE="$CREDS_DIR/creds"
 printf 'https://test-user:S3CRET-TOKEN-0001@github.com\nhttps://test-user2:S3CRET-TOKEN-0002@gitlab.com\nhttps://test-user3:S3CRET-TOKEN-0003@git.example.com:8443\n' > "$CREDS_FILE"
 cp "$CREDS_FILE" "$WORK/creds.before"
@@ -409,7 +409,7 @@ cmp -s "$CREDS_FILE" "$WORK/creds.before" && ok "the credentials file on the hos
 
 # Test that credential.helper reset prevents store from writing to pod
 # Create a gitconfig with helper = store
-GITCONFIG_DIR="$(mktemp -d)"
+GITCONFIG_DIR="$(mktemp -d "$WORK/gitconfig.XXXXXX")"
 GITCONFIG_FILE="$GITCONFIG_DIR/gitconfig"
 printf '[credential]\n\thelper = store\n' > "$GITCONFIG_FILE"
 

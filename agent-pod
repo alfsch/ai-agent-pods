@@ -249,13 +249,20 @@ refuse_writable_file() {
 
 # refuse_writable_file only looks at the directory a file physically lies in, which hides a symlinked directory in
 # the path: $PROJECT/pivot/credentials, with pivot a link to somewhere else, passes, and the pod can retarget pivot.
-# So every directory in the path (as written) that is a symlink must itself be out of the pod's reach.
+# So every directory in the path (as written) that is a symlink must itself be out of the pod's reach, and so must the
+# links on the way to where it leads (config/alias -> $PROJECT/pivot -> /outside).
 refuse_writable_path() {
-  local label="$1" p="$2"
+  local label="$1" p="$2" depth="${3:-0}" t
   case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
   p="$(dirname "$p")"
   while [ "$p" != "/" ] && [ "$p" != "." ]; do
-    if [ -L "$p" ]; then refuse_writable_file "$label" "$p"; fi
+    if [ -L "$p" ]; then
+      refuse_writable_file "$label" "$p"
+      [ "$depth" -lt 20 ] || die "The symlinks in $2 are nested more than 20 deep."
+      t="$(readlink "$p")"
+      case "$t" in /*) ;; *) t="$(dirname "$p")/$t" ;; esac
+      refuse_writable_path "$label" "$t/." "$((depth + 1))"
+    fi
     p="$(dirname "$p")"
   done
 }

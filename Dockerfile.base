@@ -254,72 +254,42 @@ case "$_host" in
     ;;
 esac
 
-# A host chosen on the command line (--hostname, -R/--repo as HOST/OWNER/REPO, GH_REPO) must be the host the token was looked up for:
-# gh would send GH_TOKEN to any *.ghe.com host. Used only when the token comes from the credentials file.
+# A host named on the command line must be the host the token was looked up for: gh sends GH_TOKEN to any *.ghe.com host and
+# GH_ENTERPRISE_TOKEN to any other, whatever the command names. Checked: --hostname, -R/--repo and GH_REPO as HOST/OWNER/REPO,
+# and an argument that is a URL. Only used when the token comes from the credentials file.
+check_host() {   # <kind> <value>: refuse a value that names another host than $_host
+  _named=
+  case "$1" in
+    host) _named="$2" ;;
+    url) _named="${2#*://}"; _named="${_named%%/*}" ;;
+    repo)
+      case "$2" in
+        http://*|https://*) _named="${2#*://}"; _named="${_named%%/*}" ;;
+        *) case "${2#*/}" in */*) _named="${2%%/*}" ;; esac ;;   # OWNER/REPO names no host
+      esac ;;
+  esac
+  if [ -n "$_named" ] && [ "$_named" != "$_host" ]; then
+    printf 'gh: the command names host %s but the credential was looked up for %s; set GH_HOST=%s\n' "$_named" "$_host" "$_named" >&2
+    exit 1
+  fi
+}
 refuse_other_host() {
-  _explicit_host=""
-  _next_is_host=0
-  _explicit_host_from_hostname=0
+  _next=
   for _arg in "$@"; do
-    if [ "$_next_is_host" = 1 ]; then
-      _explicit_host="$_arg"
-      _next_is_host=0
-      continue
-    fi
+    if [ -n "$_next" ]; then check_host "$_next" "$_arg"; _next=; continue; fi
     case "$_arg" in
-      --hostname=*) _explicit_host="${_arg#--hostname=}"; _explicit_host_from_hostname=1 ;;
-      --hostname) _next_is_host=1; _explicit_host_from_hostname=1 ;;
-      -R=*) _explicit_host="${_arg#-R=}" ;;
-      -R) _next_is_host=1 ;;
-      -R*) _explicit_host="${_arg#-R}" ;;
-      --repo=*) _explicit_host="${_arg#--repo=}" ;;
-      --repo) _next_is_host=1 ;;
+      --hostname=*) check_host host "${_arg#--hostname=}" ;;
+      --hostname) _next=host ;;
+      -R=*) check_host repo "${_arg#-R=}" ;;
+      -R) _next=repo ;;
+      -R*) check_host repo "${_arg#-R}" ;;
+      --repo=*) check_host repo "${_arg#--repo=}" ;;
+      --repo) _next=repo ;;
+      http://*|https://*) check_host url "$_arg" ;;
       --) break ;;
     esac
   done
-
-  # Also check GH_REPO environment variable
-  if [ -n "$_explicit_host" ]; then
-    # For -R/--repo: only extract host if value has format HOST/OWNER/REPO (3 parts, 2 slashes)
-    # If it's OWNER/REPO (2 parts, 1 slash), there's no host to extract
-    if [ "$_explicit_host_from_hostname" = 1 ]; then
-      # From --hostname, it's already just a host
-      : # keep _explicit_host as is
-    else
-      # From -R/--repo: check if it has at least 2 slashes (3 parts)
-      # Use parameter expansion to check: if removing first part leaves another slash, it's 3+ parts
-      _rest_after_first="${_explicit_host#*/}"
-      case "$_rest_after_first" in
-        */*)
-          # Has at least 2 slashes, so it's HOST/OWNER/REPO
-          _host_part="${_explicit_host%%/*}"
-          if [ -n "$_host_part" ]; then
-            _explicit_host="$_host_part"
-          fi
-          ;;
-        *)
-          # OWNER/REPO with no host, so clear it
-          _explicit_host=""
-          ;;
-      esac
-    fi
-  elif [ -n "${GH_REPO:-}" ]; then
-    # Same logic for GH_REPO: only extract host if it has 2+ slashes
-    _rest_after_first="${GH_REPO#*/}"
-    case "$_rest_after_first" in
-      */*)
-        _host_part="${GH_REPO%%/*}"
-        if [ -n "$_host_part" ]; then
-          _explicit_host="$_host_part"
-        fi
-        ;;
-    esac
-  fi
-
-  if [ -n "$_explicit_host" ] && [ "$_explicit_host" != "$_host" ]; then
-    printf 'gh: the command names host %s but the credential was looked up for %s; set GH_HOST=%s\n' "$_explicit_host" "$_host" "$_explicit_host" >&2
-    exit 1
-  fi
+  if [ -n "${GH_REPO:-}" ]; then check_host repo "$GH_REPO"; fi
 }
 
 # Try to get credentials from the helper
