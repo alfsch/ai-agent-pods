@@ -247,13 +247,17 @@ refuse_writable_file() {
   done
 }
 
-# Resolve symlinks for a file, following at most 20 links
-# Echoes the final target path to stdout, or echoes error to stderr and returns 1 on loop
+# Resolve symlinks for a file, following at most 20 links, and validate each hop
+# Echoes the final target path to stdout, or dies on error
 resolve_symlink_chain() {
   local file="$1"
+  local option_name="$2"
   local max_steps=20
   local step=0
   local current="$file"
+  
+  # Check the original path
+  refuse_writable_file "$option_name" "$current"
   
   while [ $step -lt $max_steps ]; do
     # Get the symlink target (relative to the link's directory)
@@ -267,6 +271,9 @@ resolve_symlink_chain() {
     else
       current="$(cd "$(dirname "$current")" && pwd -P)/$target"
     fi
+    
+    # Check each intermediate hop
+    refuse_writable_file "$option_name" "$current"
     
     step=$((step + 1))
   done
@@ -326,10 +333,9 @@ elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT
 elif [ -f "$A_CFG_HOME/credentials" ]; then CRED_FILE="$A_CFG_HOME/credentials"
 fi
 if [ -n "$CRED_FILE" ]; then
-  # Validate the file - follow symlink chain to get the final target
+  # Validate the file - follow symlink chain to get the final target, checking each hop
   _cred_file="$CRED_FILE"
-  _cred_file="$(resolve_symlink_chain "$_cred_file")" 2>&1 || die "Cannot resolve symlinks for $CRED_FILE."
-  refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"
+  _cred_file="$(resolve_symlink_chain "$_cred_file" "git credentials file (AGENT_POD_GIT_CREDENTIALS)")" 2>&1 || die "Cannot resolve symlinks for $CRED_FILE."
   CRED_FILE="$_cred_file"
   
   # Validate each non-comment, non-blank line using awk for portability

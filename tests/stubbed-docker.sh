@@ -1269,9 +1269,9 @@ test_git_credential_helper() {   # the git-credential-agent-pod helper in the ba
 }
 
 test_git_credentials() {   # git credentials file lookup and validation in the launcher
-  local C P
+  local C P PH
   # the launcher mounts the physical path (macOS: /var is /private/var), so the expectations use it too
-  gc() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; P="$(cd "$CASE" && pwd -P)"; }
+  gc() { setup_case; mkdir -p "$H/config/agent-pod"; C="$(cd "$H/config/agent-pod" && pwd -P)"; P="$(cd "$CASE" && pwd -P)"; PH="$(cd "$H" && pwd -P)"; }
   
   # none: no mount at all
   gc; launch -- true; rc_is 0; not_logged 'git-credentials'
@@ -1447,7 +1447,7 @@ FAKE_AWK
   gc; mkdir -p "$C" "$PROJ/../outside_dir"
   printf 'https://u:S3CRET-TOKEN-FIX1REL@github.com\n' > "$PROJ/../outside_dir/creds"
   launch AGENT_POD_GIT_CREDENTIALS=../outside_dir/creds -- true; rc_is 0
-  # The path should be normalized to absolute
+  # The path should be normalized to absolute and physical (macOS: /var -> /private/var)
   local expected_path
   expected_path="$(cd "$PROJ/../outside_dir" && pwd -P)/creds"
   logged " -v $expected_path:/run/agent-pod/git-credentials:ro "
@@ -1457,7 +1457,7 @@ FAKE_AWK
   printf 'https://u:S3CRET-TOKEN-FIX1SYMDIR@github.com\n' > "$H/real_dir/creds"
   ln -s "$H/real_dir" "$H/sym_dir"
   launch AGENT_POD_GIT_CREDENTIALS="$H/sym_dir/creds" -- true; rc_is 0
-  logged " -v $H/real_dir/creds:/run/agent-pod/git-credentials:ro "
+  logged " -v $PH/real_dir/creds:/run/agent-pod/git-credentials:ro "
 
   # FIX 1: relative link target ../x into project is refused
   gc; mkdir -p "$C" "$H/parent_dir"
@@ -1482,7 +1482,7 @@ FAKE_AWK
   printf 'https://u:S3CRET-TOKEN-FIX1B@github.com\n' > "$H/outside_creds"
   ln -s "$H/outside_creds" "$C/credentials"
   launch -- true; rc_is 0
-  logged " -v $H/outside_creds:/run/agent-pod/git-credentials:ro "
+  logged " -v $PH/outside_creds:/run/agent-pod/git-credentials:ro "
 
   # FIX 1: symlink chain of two links works
   gc; mkdir -p "$C"
@@ -1490,7 +1490,7 @@ FAKE_AWK
   ln -s "$H/target_creds" "$H/link1"
   ln -s "$H/link1" "$C/credentials"
   launch -- true; rc_is 0
-  logged " -v $H/target_creds:/run/agent-pod/git-credentials:ro "
+  logged " -v $PH/target_creds:/run/agent-pod/git-credentials:ro "
 
   # FIX 1: symlink loop is refused
   gc; mkdir -p "$C"
@@ -1505,6 +1505,32 @@ FAKE_AWK
   launch -- true; [ "$RC" != 0 ] || fail "symlink loop was accepted"
   in_out 'Symlink chain.*too long'
   not_logged '^run '
+
+  # S3: symlink chain security - check each hop
+  # (a) a link in the config dir pointing to a link in the project that points to a host file outside is REFUSED (the middle hop is writable)
+  gc; mkdir -p "$C" "$PROJ"
+  printf 'https://u:S3CRET-TOKEN-S3A@github.com\n' > "$H/outside_host_creds"
+  ln -s "$H/outside_host_creds" "$PROJ/middle_link"
+  ln -s "$PROJ/middle_link" "$C/credentials"
+  launch -- true; [ "$RC" != 0 ] || fail "S3a: symlink chain with writable middle hop was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # (b) the original path itself in a writable dir, as a link to a safe file, is refused
+  gc; mkdir -p "$PROJ"
+  printf 'https://u:S3CRET-TOKEN-S3B@github.com\n' > "$H/safe_creds"
+  ln -s "$H/safe_creds" "$PROJ/link_to_safe"
+  launch AGENT_POD_GIT_CREDENTIALS="$PROJ/link_to_safe" -- true; [ "$RC" != 0 ] || fail "S3b: original path in writable dir was accepted"
+  in_out 'git credentials file.*AGENT_POD_GIT_CREDENTIALS.*can write'
+  not_logged '^run '
+
+  # (c) the chain of two links in trusted dirs is still accepted
+  gc; mkdir -p "$C/trusted1" "$C/trusted2"
+  printf 'https://u:S3CRET-TOKEN-S3C@github.com\n' > "$C/trusted1/target_creds"
+  ln -s "$C/trusted1/target_creds" "$C/trusted2/link1"
+  ln -s "$C/trusted2/link1" "$C/credentials"
+  launch -- true; rc_is 0
+  logged " -v $C/trusted1/target_creds:/run/agent-pod/git-credentials:ro "
 
 }
 
@@ -2050,18 +2076,17 @@ run_mutants() {
   mutate test_git_credentials 'printf "%s", host;' 'printf "%s", user;' agent-pod || rc=1
   mutate test_git_credentials 'printf "%s", host;' 'printf "%s", token;' agent-pod || rc=1
   mutate test_git_credentials 'if (path != "") printf "/%s", path;' 'if (path != "") printf "%s", token;' agent-pod || rc=1
-  # Mutants for refuse_writable_file label
-  mutate test_git_credentials 'refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)"' 'refuse_writable_file "git credentials"' agent-pod || rc=1
   # Mutants for awk exit status check
   mutate test_git_credentials 'if [ $_validation_rc -ne 0 ]; then' 'if false; then' agent-pod || rc=1
-  # Mutants for Step E: guard
-  mutate test_git_credentials 'refuse_writable_file "git credentials file (AGENT_POD_GIT_CREDENTIALS)" "$_cred_file"' 'true' agent-pod || rc=1
-  # FIX 1 mutants
-  mutate test_git_credentials 'resolve_symlink_chain "$_cred_file"' ':' agent-pod || rc=1
-  mutate test_git_credentials '_cred_file="$(resolve_symlink_chain "$_cred_file")" 2>&1' '_cred_file="$_cred_file"' agent-pod || rc=1
+  # Mutants for Step E: guard - now handled by resolve_symlink_chain
+  mutate test_git_credentials 'resolve_symlink_chain "$_cred_file" "git credentials file (AGENT_POD_GIT_CREDENTIALS)"' 'resolve_symlink_chain "$_cred_file" "git credentials"' agent-pod || rc=1
+  mutate test_git_credentials '_cred_file="$(resolve_symlink_chain "$_cred_file" "git credentials file (AGENT_POD_GIT_CREDENTIALS)")" 2>&1' '_cred_file="$_cred_file"' agent-pod || rc=1
   mutate test_git_credentials 'CRED_FILE="$_cred_file"' ':' agent-pod || rc=1
   mutate test_git_credentials 'echo "Symlink chain for' ':' agent-pod || rc=1
   mutate test_git_credentials 'echo "$dir/$(basename "$current")"' 'echo "$current"' agent-pod || rc=1
+  # Mutants for per-hop check in resolve_symlink_chain
+  mutate test_git_credentials 'refuse_writable_file "$option_name" "$current"' 'true' agent-pod || rc=1
+  mutate test_git_credentials $'    # Check each intermediate hop\n    refuse_writable_file "$option_name" "$current"' '    # Check each intermediate hop' agent-pod || rc=1
   # Mutants for Step E: mount
   mutate test_git_credentials 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")' 'CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials")' agent-pod || rc=1
   # Mutants for Step E: GIT_CONFIG variables

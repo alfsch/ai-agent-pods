@@ -318,8 +318,10 @@ for host in github.com gitlab.com git.example.com:8443; do
     git.example.com:8443) expected_user="test-user3" expected_pass="S3CRET-TOKEN-0003" ;;
     *) expected_user="test-user" expected_pass="S3CRET-TOKEN-0001" ;;
   esac
-  result=$(printf "protocol=https\nhost=%s\n\n" "$host" | GIT_TERMINAL_PROMPT=0 git credential fill)
+  _git_out=$(printf "protocol=https\nhost=%s\n\n" "$host" | GIT_TERMINAL_PROMPT=0 git credential fill)
   fill_rc=$?
+  # Extract only username and password lines, ignoring protocol and host
+  result=$(printf "%s" "$_git_out" | grep -E "^(username|password)=") || result=""
   expected="username=$expected_user
 password=$expected_pass"
   if [ "$result" = "$expected" ] && [ "$fill_rc" = 0 ]; then
@@ -333,8 +335,10 @@ password=$expected_pass"
 done
 
 # Test unknown host with git credential fill exits non-zero and prints no password
-result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill)
+_git_out=$(printf "protocol=https\nhost=unknown.example.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill)
 fill_rc=$?
+# Extract only username and password lines, ignoring protocol and host
+result=$(printf "%s" "$_git_out" | grep -E "^(username|password)=") || result=""
 if [ "$fill_rc" != 0 ] && ! echo "$result" | grep -q "^password="; then
   echo "STEP ok unknown host fill exits non-zero with no password"
 else

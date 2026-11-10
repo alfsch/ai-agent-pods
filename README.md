@@ -171,7 +171,7 @@ A host-level line (no path) is the fallback for the host. `gh` needs a host-leve
 
 The launcher mounts the file read-only as `/run/agent-pod/git-credentials` and configures a get-only credential helper, so the pod cannot change the file. Whatever it holds is visible to the pod: keep it to the credentials. A file in the project folder or in a directory the pod can write is refused, because the pod could swap it for a symlink to a host file. Separate files per project give you separation; a token the pod can read can be sent anywhere the network allows (the network is open), so use fine-grained tokens with short expiry where possible. See [issue #41](https://github.com/alfsch/ai-agent-pods/issues/41) for details. SSH remotes are not covered.
 
-`uninstall.sh` removes the agent images, state dirs, cache volumes and sidecars; credentials files in `~/.config/agent-pod` are not removed and must be deleted by hand.
+`uninstall.sh` deletes `~/.config/agent-pod`, and with it the credentials files kept there (after its confirmation): back them up first if you want to keep them.
 
 ### Using Docker inside the pod
 
