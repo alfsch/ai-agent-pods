@@ -47,6 +47,7 @@ usage() {
   row "Docker access:"     "DOCKER=1 $HERE/agent-pod claude"
   row "Keep Docker cache:" "DOCKER=1 DOCKER_CACHE=1 $HERE/agent-pod claude"
   row "Git identity:"      "AGENT_POD_GITCONFIG=~/.gitconfig-work $HERE/agent-pod claude"
+  row "Git credentials:"   "AGENT_POD_GIT_CREDENTIALS=~/.config/agent-pod/credentials $HERE/agent-pod claude"
   row "Second login:"      "AGENT_POD_PROFILE=work $HERE/agent-pod claude"
   row "Extra skills:"      "AGENT_POD_SKILLS_DIR=~/skills $HERE/agent-pod claude"
   printf '\n'
@@ -233,6 +234,64 @@ for _d in $A_EXTRA_DIRS; do
   EXTRA_MOUNTS+=(-v "$A_CFG_HOME/$A_KEY-${_d##*/}:/home/agent-pod/$_d")
 done
 
+# Check that a file is not in a directory the pod can write (project, state dir, mounted config dirs).
+# The pod could replace it with a symlink to a host file.
+refuse_writable_file() {
+  local option_name="$1" file="$2"
+  local _gd _w
+  _gd="$(cd "$(dirname "$file")" && pwd -P)" || die "Cannot use $file."
+  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-${_d##*/}"); done
+  for _w in "${_writable[@]}"; do
+    _w="$(cd "$_w" && pwd -P)" || continue
+    case "$_gd/" in "$_w"/*) die "The $option_name $file is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
+  done
+}
+
+# refuse_writable_file only looks at the directory a file physically lies in, which hides a symlinked directory in
+# the path: $PROJECT/pivot/credentials, with pivot a link to somewhere else, passes, and the pod can retarget pivot.
+# So every directory in the path (as written) that is a symlink must itself be out of the pod's reach, and so must the
+# links on the way to where it leads (config/alias -> $PROJECT/pivot -> /outside).
+refuse_writable_path() {
+  local label="$1" p="$2" depth="${3:-0}" t
+  case "$p" in /*) ;; *) p="$PWD/$p" ;; esac
+  p="$(dirname "$p")"
+  while [ "$p" != "/" ] && [ "$p" != "." ]; do
+    if [ -L "$p" ]; then
+      refuse_writable_file "$label" "$p"
+      [ "$depth" -lt 20 ] || die "The symlinks in $2 are nested more than 20 deep."
+      t="$(readlink "$p")"
+      case "$t" in /*) ;; *) t="$(dirname "$p")/$t" ;; esac
+      refuse_writable_path "$label" "$t/." "$((depth + 1))"
+    fi
+    p="$(dirname "$p")"
+  done
+}
+
+# The file a credentials path leads to, after at most 20 symlinks, as an absolute physical path. The original path and every
+# hop are checked before the link is followed: a link the pod can replace would let it choose the file of the next session.
+resolve_symlink_chain() {
+  local file="$1" option_name="$2" max_steps=20 step=0 current target dir
+  current="$file"
+  refuse_writable_path "$option_name" "$current"
+  refuse_writable_file "$option_name" "$current"
+  while [ "$step" -lt "$max_steps" ]; do
+    target="$(readlink "$current")" || break   # not a symlink: done
+    case "$target" in
+      /*) current="$target" ;;
+      *) current="$(cd "$(dirname "$current")" && pwd -P)/$target" ;;
+    esac
+    refuse_writable_path "$option_name" "$current"
+    refuse_writable_file "$option_name" "$current"
+    step=$((step + 1))
+  done
+  if [ "$step" -ge "$max_steps" ] && [ -L "$current" ]; then
+    echo "Symlink chain for $file is too long (more than $max_steps links)." >&2
+    return 1
+  fi
+  dir="$(cd "$(dirname "$current")" && pwd -P)" || { echo "Cannot use $current." >&2; return 1; }
+  echo "$dir/$(basename "$current")"
+}
+
 # The git identity: a git config file of the user's, mounted read-only as the pod's global ~/.gitconfig (the home is
 # thrown away, so there is none otherwise). AGENT_POD_GITCONFIG names one explicitly and must exist (a typo must not
 # commit as another identity); else <agent>-<profile>.gitconfig (with a profile), else <agent>.gitconfig, else gitconfig in the config dir; none of them: no mount (Docker
@@ -252,12 +311,99 @@ fi
 if [ -n "$_g" ]; then
   _gd="$(cd "$(dirname "$_g")" && pwd -P)" || die "Cannot use $_g."
   _g="$_gd/$(basename "$_g")"
-  _writable=("$PWD" "$A_STATE_DIR"); for _d in $A_EXTRA_DIRS; do _writable+=("$A_CFG_HOME/$A_KEY-${_d##*/}"); done
-  for _w in "${_writable[@]}"; do
-    _w="$(cd "$_w" && pwd -P)" || continue
-    case "$_gd/" in "$_w"/*) die "The git config $_g is in $_w, which the pod can write (it could replace the file with a symlink to a host file). Keep it elsewhere, such as ~/.config/agent-pod." ;; esac
-  done
+  refuse_writable_file "git config" "$_g"
   GIT_MOUNT=(-v "$_g:/home/agent-pod/.gitconfig:ro")
+fi
+
+# Git credentials: a file of HTTPS git credentials, mounted read-only as /run/agent-pod/git-credentials.
+# AGENT_POD_GIT_CREDENTIALS names one explicitly and must exist (a typo must not silently use another token);
+# else <agent>-<profile>.credentials (with AGENT_POD_PROFILE), else <agent>.credentials, else credentials in the config dir;
+# none of them: no mount. The file must not be in a directory the pod can write (the project, the state dir, the
+# dirs mounted from the config dir), and the pod cannot change it. The path is made absolute (Docker takes a
+# relative source for a volume name). Every non-comment line must be https://<user>:<token>@<host>[:port][/org[/repo]]
+# with %XX escapes decoded; user and token must not be empty, path must not end in .git or / or contain //,
+# host+path must be unique, and a % must be followed by two hex digits. The helper git-credential-agent-pod
+# reads from it. Whatever it holds is visible to the pod: keep it to the credentials.
+CRED_FILE=
+CRED_MOUNT=()
+if [ -n "${AGENT_POD_GIT_CREDENTIALS:-}" ]; then
+  [ -f "$AGENT_POD_GIT_CREDENTIALS" ] || die "AGENT_POD_GIT_CREDENTIALS=$AGENT_POD_GIT_CREDENTIALS is not a file."
+  CRED_FILE="$AGENT_POD_GIT_CREDENTIALS"
+elif [ -f "$A_CFG_HOME/$A_KEY.credentials" ]; then CRED_FILE="$A_CFG_HOME/$A_KEY.credentials"
+elif [ -f "$A_CFG_HOME/$AGENT.credentials" ]; then CRED_FILE="$A_CFG_HOME/$AGENT.credentials"
+elif [ -f "$A_CFG_HOME/credentials" ]; then CRED_FILE="$A_CFG_HOME/credentials"
+fi
+if [ -n "$CRED_FILE" ]; then
+  # Validate the file - follow symlink chain to get the final target, checking each hop
+  _cred_file="$CRED_FILE"
+  _cred_file="$(resolve_symlink_chain "$_cred_file" "git credentials file (AGENT_POD_GIT_CREDENTIALS)")" 2>&1 || die "Cannot resolve symlinks for $CRED_FILE."
+  CRED_FILE="$_cred_file"
+  
+  # Validate each non-comment, non-blank line using awk for portability
+  # awk prints validation errors to stdout (to be captured) and scopes to stdout on success
+  _validation_output=$(awk '
+# an escape is a % that is not followed by two hex digits; user and token are checked on their own, so one cannot borrow from the other
+function bad_escape(s,   pos) {
+  for (pos = index(s, "%"); pos > 0; pos = index(s, "%")) {
+    if (substr(s, pos + 1, 2) !~ /^[0-9A-Fa-f][0-9A-Fa-f]$/) return 1
+    s = substr(s, pos + 3)
+  }
+  return 0
+}
+BEGIN { line_num = 0; seen = ""; scopes = ""; first_scope = 1 }
+/^[[:space:]]*#|^[[:space:]]*$/ { next }
+{
+  line_num++
+  if (substr($0, 1, 8) != "https://") { print "line " line_num ": scheme must be https://"; exit 1 }
+  rest = substr($0, 9)
+  at_pos = index(rest, "@")
+  if (at_pos == 0) { print "line " line_num ": missing @"; exit 1 }
+  creds = substr(rest, 1, at_pos - 1)
+  hostpath = substr(rest, at_pos + 1)
+  if (index(hostpath, "@") > 0) { print "line " line_num ": unescaped @ in the host; write @ in the user or token as %40"; exit 1 }
+  colon_pos = index(creds, ":")
+  if (colon_pos == 0) { print "line " line_num ": user or token missing"; exit 1 }
+  user = substr(creds, 1, colon_pos - 1)
+  token = substr(creds, colon_pos + 1)
+  if (user == "" || token == "") { print "line " line_num ": user or token missing"; exit 1 }
+  if (bad_escape(user) || bad_escape(token)) { print "line " line_num ": % must be followed by two hex digits"; exit 1 }
+  if (index(hostpath, "//") > 0) { print "line " line_num ": path must not contain //"; exit 1 }
+  if (substr(hostpath, length(hostpath)) == "/") { print "line " line_num ": path must not end in /"; exit 1 }
+  slash_pos = index(hostpath, "/")
+  if (slash_pos == 0) {
+    host = hostpath
+    path = ""
+  } else {
+    host = substr(hostpath, 1, slash_pos - 1)
+    path = substr(hostpath, slash_pos + 1)
+  }
+  if (path != "" && substr(path, length(path) - 3) == ".git") { print "line " line_num ": path must not end in .git"; exit 1 }
+  key = host ":" path
+  if (index(" " seen " ", " " key " ") > 0) { print "line " line_num ": duplicate host+path"; exit 1 }
+  seen = seen " " key
+  
+  # Build scope string: host[:port][/path]
+  if (!first_scope) printf ", ";
+  printf "%s", host;
+  if (path != "") printf "/%s", path;
+  first_scope = 0
+}
+END {
+  if (!first_scope) printf "\n"
+}
+' "$CRED_FILE") || _validation_rc=$?
+  if [ -z "${_validation_rc:-}" ]; then _validation_rc=0; fi
+  if [ $_validation_rc -ne 0 ]; then
+    _validation_error="$_validation_output"
+    die "AGENT_POD_GIT_CREDENTIALS: $_validation_error"
+  fi
+  _scopes="$_validation_output"
+  
+  CRED_MOUNT=(-v "$CRED_FILE:/run/agent-pod/git-credentials:ro")
+  # Print scopes on stderr
+  if [ -n "$_scopes" ]; then
+    printf 'Git credentials: %s (%s)\n' "$CRED_FILE" "$_scopes" >&2
+  fi
 fi
 
 # AGENT_POD_SKILLS_DIR: a host folder of skills (<name>/SKILL.md), mounted read-only, one mount per skill so that the
@@ -610,6 +756,10 @@ AGENT_ENV=()
 [ -z "$A_NOUPDATE" ] || AGENT_ENV+=(-e "$A_NOUPDATE")
 { [ "${POD_USER%%:*}" != 0 ] || [ -z "$A_ROOT_ENV" ]; } || AGENT_ENV+=(-e "$A_ROOT_ENV")
 for _v in $A_ENV $A_FORWARD; do AGENT_ENV+=(-e "$_v"); done
+# Add git credentials environment variables if CRED_FILE is set
+if [ -n "$CRED_FILE" ]; then
+  AGENT_ENV+=(-e GIT_CONFIG_COUNT=3 -e GIT_CONFIG_KEY_0=credential.helper -e GIT_CONFIG_VALUE_0= -e GIT_CONFIG_KEY_1=credential.helper -e GIT_CONFIG_VALUE_1=/usr/local/bin/git-credential-agent-pod -e GIT_CONFIG_KEY_2=credential.useHttpPath -e GIT_CONFIG_VALUE_2=true)
+fi
 RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${DOCKER:+--name "$POD_NAME"} \
   ${DOCKER:+--init} \
@@ -626,6 +776,7 @@ RUN_CMD=(docker run "${DOCKER_FLAGS[@]}" \
   ${A_CFG_FILE:+-v "$A_CFG_PATH:/home/agent-pod/$A_CFG_FILE"} \
   ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   ${GIT_MOUNT[@]+"${GIT_MOUNT[@]}"} \
+  ${CRED_MOUNT[@]+"${CRED_MOUNT[@]}"} \
   ${SKILLS_MOUNT[@]+"${SKILLS_MOUNT[@]}"} \
   "$IMAGE" "$@")
 

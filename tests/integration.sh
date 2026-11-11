@@ -302,6 +302,149 @@ else fail "the session that prunes starts and ends normally (exit $rc)"; tail -n
 check_not "a cache unused for longer than the limit is removed" sd volume inspect "$PRUNE_VOL"
 check "the current project's cache is kept" sd volume inspect "$CACHE_VOL"
 
+section "git credentials"
+# Create a credentials file outside the project with fake tokens
+CREDS_DIR="$(mktemp -d "$WORK/credentials.XXXXXX")"
+CREDS_FILE="$CREDS_DIR/creds"
+printf 'https://test-user:S3CRET-TOKEN-0001@github.com\nhttps://test-user2:S3CRET-TOKEN-0002@gitlab.com\nhttps://test-user3:S3CRET-TOKEN-0003@git.example.com:8443\n' > "$CREDS_FILE"
+cp "$CREDS_FILE" "$WORK/creds.before"
+
+# Build a script that tests all git credential functionality in one session
+POD_SCRIPT='
+# Test git credential fill for each host
+for host in github.com gitlab.com git.example.com:8443; do
+  case "$host" in
+    gitlab.com) expected_user="test-user2" expected_pass="S3CRET-TOKEN-0002" ;;
+    git.example.com:8443) expected_user="test-user3" expected_pass="S3CRET-TOKEN-0003" ;;
+    *) expected_user="test-user" expected_pass="S3CRET-TOKEN-0001" ;;
+  esac
+  _git_out=$(printf "protocol=https\nhost=%s\n\n" "$host" | GIT_TERMINAL_PROMPT=0 git credential fill)
+  fill_rc=$?
+  # Extract only username and password lines, ignoring protocol and host
+  result=$(printf "%s" "$_git_out" | grep -E "^(username|password)=") || result=""
+  expected="username=$expected_user
+password=$expected_pass"
+  if [ "$result" = "$expected" ] && [ "$fill_rc" = 0 ]; then
+    echo "STEP ok git credential fill returns correct user and password for $host"
+  else
+    echo "STEP FAIL git credential fill returns correct user and password for $host"
+    echo "  expected: $expected"
+    echo "  got: $result"
+    echo "  exit code: $fill_rc"
+  fi
+done
+
+# Test unknown host with git credential fill exits non-zero and prints no password
+_git_out=$(printf "protocol=https\nhost=unknown.example.com\n\n" | GIT_TERMINAL_PROMPT=0 git credential fill)
+fill_rc=$?
+# Extract only username and password lines, ignoring protocol and host
+result=$(printf "%s" "$_git_out" | grep -E "^(username|password)=") || result=""
+if [ "$fill_rc" != 0 ] && ! echo "$result" | grep -q "^password="; then
+  echo "STEP ok unknown host fill exits non-zero with no password"
+else
+  echo "STEP FAIL unknown host fill exits non-zero with no password"
+  echo "  exit code: $fill_rc"
+  echo "  got: $result"
+fi
+
+# Keep ONE direct helper call for the unknown host (prints nothing, exit 0)
+result=$(printf "protocol=https\nhost=unknown.example.com\n\n" | /usr/local/bin/git-credential-agent-pod get)
+if [ -z "$result" ]; then
+  echo "STEP ok unknown host helper returns nothing"
+else
+  echo "STEP FAIL unknown host helper returns nothing"
+  echo "  got: $result"
+fi
+
+# Test approve and reject leave the file byte-identical
+cp /run/agent-pod/git-credentials /tmp/creds-backup
+printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-0001\n\n" | git credential approve
+approve_rc=$?
+printf "protocol=https\nhost=github.com\n\n" | git credential reject
+reject_rc=$?
+if [ "$approve_rc" = 0 ] && [ "$reject_rc" = 0 ] && cmp -s /run/agent-pod/git-credentials /tmp/creds-backup; then
+  echo "STEP ok approve and reject leave the credentials file byte-identical"
+else
+  echo "STEP FAIL approve and reject leave the credentials file byte-identical"
+  echo "  approve exit code: $approve_rc"
+  echo "  reject exit code: $reject_rc"
+fi
+rm -f /tmp/creds-backup
+
+# Test gh is the wrapper
+gh_path=$(command -v gh)
+if [ "$gh_path" = "/usr/local/bin/gh" ]; then
+  echo "STEP ok gh is the wrapper in the pod"
+else
+  echo "STEP FAIL gh is the wrapper in the pod"
+  echo "  got: $gh_path"
+fi
+
+# Test that the fake tokens do not appear in the environment
+if ! env | grep -q "S3CRET-TOKEN"; then
+  echo "STEP ok fake tokens do not appear in pod environment"
+else
+  echo "STEP FAIL fake tokens do not appear in pod environment"
+  env | grep "S3CRET-TOKEN"
+fi
+'
+
+# Run the session with the credentials file
+run_launcher AGENT_POD_GIT_CREDENTIALS="$CREDS_FILE" -- sh -c "$POD_SCRIPT" sh >"$WORK/git-creds.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "git credentials session exits 0"; else fail "git credentials session exits 0 (got $rc)"; tail -n 20 "$WORK/git-creds.out" | indent; fi
+
+# Check the output for the expected STEP lines
+session_failed=$([ "$rc" = 0 ] || echo 1)
+while IFS= read -r line; do
+  case "$line" in
+    "STEP ok "*) ok "${line#STEP ok }" ;;
+    "STEP FAIL "*) fail "${line#STEP FAIL }"; session_failed=1 ;;
+  esac
+done <"$WORK/git-creds.out"
+[ "$(grep -c '^STEP ok ' "$WORK/git-creds.out")" -eq 8 ] || { fail "git credentials session ran all its steps"; session_failed=1; }
+[ -z "$session_failed" ] || { echo "  session output:"; tail -n 60 "$WORK/git-creds.out" | indent; }
+
+# Check that the credentials file on the host is unchanged
+cmp -s "$CREDS_FILE" "$WORK/creds.before" && ok "the credentials file on the host is unchanged" || fail "the credentials file on the host is unchanged"
+
+# Test that credential.helper reset prevents store from writing to pod
+# Create a gitconfig with helper = store
+GITCONFIG_DIR="$(mktemp -d "$WORK/gitconfig.XXXXXX")"
+GITCONFIG_FILE="$GITCONFIG_DIR/gitconfig"
+printf '[credential]\n\thelper = store\n' > "$GITCONFIG_FILE"
+
+# Run a session with both credentials and gitconfig
+POD_SCRIPT_T1='
+# Test that store helper does not write to pod when our helper resets it first
+printf "protocol=https\nhost=github.com\nusername=test-user\npassword=S3CRET-TOKEN-T1\n\n" | git credential approve
+approve_rc=$?
+if [ "$approve_rc" = 0 ] && [ ! -f "$HOME/.git-credentials" ]; then
+  echo "STEP ok credential helper reset prevents store from writing to pod"
+else
+  echo "STEP FAIL credential helper reset prevents store from writing to pod"
+  echo "  approve exit code: $approve_rc"
+  echo "  .git-credentials exists: $[ -f "$HOME/.git-credentials" ]"
+  if [ -f "$HOME/.git-credentials" ]; then
+    echo "  contents:"
+    cat "$HOME/.git-credentials"
+  fi
+fi
+'
+
+run_launcher AGENT_POD_GIT_CREDENTIALS="$CREDS_FILE" AGENT_POD_GITCONFIG="$GITCONFIG_FILE" -- sh -c "$POD_SCRIPT_T1" sh >"$WORK/git-creds-t1.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then ok "git credentials helper-reset session exits 0"; else fail "git credentials helper-reset session exits 0 (got $rc)"; tail -n 20 "$WORK/git-creds-t1.out" | indent; fi
+
+# Check the output for the expected STEP line
+while IFS= read -r line; do
+  case "$line" in
+    "STEP ok "*) ok "${line#STEP ok }" ;;
+    "STEP FAIL "*) fail "${line#STEP FAIL }" ;;
+  esac
+done <"$WORK/git-creds-t1.out"
+
+# Clean up
+rm -rf "$CREDS_DIR" "$GITCONFIG_DIR"
+
 section "nothing left behind"
 LEAKS=; SNAP_OK=
 for _ in $(seq 1 30); do

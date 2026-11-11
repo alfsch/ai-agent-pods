@@ -46,6 +46,315 @@ RUN mkdir -p /etc/agent-pod \
  && mkdir -p /home/agent-pod/.agents && cp /etc/claude-code/CLAUDE.md /home/agent-pod/.agents/AGENTS.md
 ENV COPILOT_CUSTOM_INSTRUCTIONS_DIRS=/etc/agent-pod
 
+# git credential helper: get-only, reads from a mounted file, matches by host/port/path
+RUN cat > /usr/local/bin/git-credential-agent-pod <<'GIT_CRED_EOF'
+#!/bin/sh
+# Get-only git credential helper for agent-pod
+# Reads from ${AGENT_POD_CREDENTIALS_FILE:-/run/agent-pod/git-credentials}
+# Uses awk for parsing (portable BSD awk) and sh for the rest
+
+CRED_FILE="${AGENT_POD_CREDENTIALS_FILE:-/run/agent-pod/git-credentials}"
+
+case "$1" in
+  get)
+    # Read input until blank line or EOF
+    protocol=""; host=""; path=""
+    while IFS= read -r line; do
+      [ -z "$line" ] && break
+      key="${line%%=*}"
+      value="${line#*=}"
+      case "$key" in
+        protocol) protocol="$value" ;;
+        host) host="$value" ;;
+        path) path="$value" ;;
+      esac
+    done
+    
+    # Try to read the credentials file
+    [ -f "$CRED_FILE" ] || exit 0
+    
+    # Strip .git from path
+    case "$path" in *.git) path="${path%.git}" ;; esac
+    
+    # Parse request host for port
+    req_host="$host"
+    req_port=""
+    case "$host" in
+      *:*)
+        req_host="${host%%:*}"
+        req_port="${host#*:}"
+        ;;
+    esac
+    
+    # Use awk to find the best match and decode %XX escapes
+    # Output: username password (or nothing, decoded)
+    best_match="$(awk -v protocol="$protocol" -v req_host="$req_host" -v req_port="$req_port" -v path="$path" '
+    # URL-decode function: only decode %XX where XX are hex digits, leave % followed by non-hex unchanged
+    function urldecode(s,    result, i, hex1, hex2, val, j, c) {
+      result = ""
+      i = 1
+      while (i <= length(s)) {
+        if (substr(s, i, 1) == "%" && i + 2 <= length(s)) {
+          hex1 = substr(s, i + 1, 1)
+          hex2 = substr(s, i + 2, 1)
+          # Check if both are hex digits
+          if ((hex1 ~ /[0-9A-Fa-f]/) && (hex2 ~ /[0-9A-Fa-f]/)) {
+            val = 0
+            for (j = 1; j <= 2; j++) {
+              c = toupper(substr(s, i + j, 1))
+              if (c ~ /[0-9]/) val = val * 16 + (c + 0)
+              else val = val * 16 + (index("ABCDEF", c) + 9)
+            }
+            result = result sprintf("%c", val)
+            i = i + 3
+          } else {
+            # Not a valid hex escape, keep the % and following chars
+            result = result substr(s, i, 1)
+            i = i + 1
+          }
+        } else {
+          result = result substr(s, i, 1)
+          i = i + 1
+        }
+      }
+      return result
+    }
+    BEGIN {
+      best_user = ""
+      best_pass = ""
+      best_len = -1
+    }
+    {
+      # Skip comments and blank lines
+      if ($0 ~ /^[[:space:]]*#/ || $0 ~ /^[[:space:]]*$/) next
+      
+      # Must start with https://
+      if (substr($0, 1, 8) != "https://") next
+      
+      line = substr($0, 9)
+      
+      # Find @
+      at_pos = index(line, "@")
+      if (at_pos == 0) next
+      
+      creds = substr(line, 1, at_pos - 1)
+      hpp = substr(line, at_pos + 1)
+      
+      # Split user:token at first colon
+      colon_pos = index(creds, ":")
+      if (colon_pos == 0) next
+      
+      user = urldecode(substr(creds, 1, colon_pos - 1))
+      token = urldecode(substr(creds, colon_pos + 1))
+      
+      # Extract port from hpp
+      port = ""
+      # Look for :<digits> at the end or before /
+      if (hpp ~ /:[0-9]+$/) {
+        # Port at end
+        port = substr(hpp, length(hpp) - length(substr(hpp, index(hpp, ":") + 1)) + 1)
+        hpp = substr(hpp, 1, index(hpp, ":") - 1)
+      } else if (hpp ~ /:[0-9]+\//) {
+        # Port before /
+        colon_pos = index(hpp, ":")
+        slash_pos = index(hpp, "/")
+        port = substr(hpp, colon_pos + 1, slash_pos - colon_pos - 1)
+        hpp = substr(hpp, 1, colon_pos - 1) substr(hpp, slash_pos)
+      }
+      
+      # Extract path
+      cred_path = ""
+      slash_pos = index(hpp, "/")
+      if (slash_pos > 0) {
+        cred_path = substr(hpp, slash_pos + 1)
+        hpp = substr(hpp, 1, slash_pos - 1)
+      }
+      
+      cred_host = hpp
+      
+      # Check protocol
+      if (protocol != "https") next
+      
+      # Check host match
+      if (cred_host != req_host) next
+      
+      # Check port match
+      if (port != "" && port != req_port) next
+      if (port == "" && req_port != "") next
+      
+      # Check path match
+      if (cred_path == "") {
+        # Host-level line - fallback
+        if (best_len < 0) {
+          best_user = user
+          best_pass = token
+          best_len = 0
+        }
+      } else {
+        if (path == cred_path) {
+          best_user = user
+          best_pass = token
+          best_len = length(cred_path)
+        } else if (substr(path, 1, length(cred_path) + 1) == cred_path "/") {
+          if (length(cred_path) > best_len) {
+            best_user = user
+            best_pass = token
+            best_len = length(cred_path)
+          }
+        }
+      }
+    }
+    END {
+      if (best_user != "") {
+        printf "%s\n%s\n", best_user, best_pass
+      }
+    }
+    ' "$CRED_FILE")"
+    
+    # If we found a match, output it with username= and password= prefixes (already decoded by awk)
+    if [ -n "$best_match" ]; then
+      user="$(printf '%s' "$best_match" | head -1)"
+      pass="$(printf '%s' "$best_match" | tail -1)"
+      printf 'username=%s\npassword=%s\n' "$user" "$pass"
+    fi
+    ;;
+  store|erase)
+    # No-op: read-only mount, cannot write
+    exit 0
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+GIT_CRED_EOF
+RUN chmod 755 /usr/local/bin/git-credential-agent-pod
+
+# gh wrapper that reads token from the git credentials helper per call
+RUN cat > /usr/local/bin/gh <<'GH_WRAPPER_EOF'
+#!/bin/sh
+# gh wrapper for agent-pod: reads token from git-credential-agent-pod per call
+# The host is GH_HOST, else github.com. If a token that applies to it is already set (GH_TOKEN or GITHUB_TOKEN for github.com and
+# *.ghe.com, GH_ENTERPRISE_TOKEN or GITHUB_ENTERPRISE_TOKEN for other hosts), or there is no credentials file, run the real gh
+# unchanged. Otherwise ask the helper for the host and pass the token to the real gh, to it alone, in the variable gh reads for that host.
+
+# Decide the host first, then bypass lookup only when a token that applies to that host is set
+_host="${GH_HOST:-github.com}"
+
+# Check if a token that applies to this host is already set
+case "$_host" in
+  github.com|*.ghe.com)
+    if [ -n "$GH_TOKEN" ] || [ -n "$GITHUB_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;
+  *)
+    if [ -n "$GH_ENTERPRISE_TOKEN" ] || [ -n "$GITHUB_ENTERPRISE_TOKEN" ]; then
+      exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+    fi
+    ;;
+esac
+
+# A host named on the command line must be the host the token was looked up for: gh sends GH_TOKEN to any *.ghe.com host and
+# GH_ENTERPRISE_TOKEN to any other, whatever the command names. Checked: --hostname, -R/--repo and GH_REPO as HOST/OWNER/REPO,
+# and every argument that is a URL, wherever it stands (a boolean flag before it, after --, the value of an option): which options
+# take a value is not known here. A URL is refused only when its host would get the same token, so github.com and *.ghe.com
+# count as one family and every other host as the other; a URL such as --body https://example.com passes for a github.com
+# token. Only used when the token comes from the credentials file.
+check_host() {   # <kind> <value>: refuse a value that names another host than $_host
+  _named=
+  case "$1" in
+    host) _named="$2" ;;
+    url)
+      _named="${2#*://}"; _named="${_named%%/*}"; _named="${_named%%\?*}"; _named="${_named%%#*}"   # the authority ends at / ? or #
+      _named="${_named##*@}"   # no user info
+      _fam_host=other; case "$_host" in github.com|*.ghe.com) _fam_host=dotcom ;; esac
+      _fam_named=other; case "${_named%%:*}" in github.com|*.ghe.com) _fam_named=dotcom ;; esac   # a port does not change the family
+      [ "$_fam_host" = "$_fam_named" ] || _named= ;;   # another family never gets this token
+    repo)
+      case "$2" in
+        http://*|https://*) _named="${2#*://}"; _named="${_named%%/*}" ;;
+        *) case "${2#*/}" in */*) _named="${2%%/*}" ;; esac ;;   # OWNER/REPO names no host
+      esac ;;
+  esac
+  if [ -n "$_named" ] && [ "$_named" != "$_host" ]; then
+    printf 'gh: the command names host %s but the credential was looked up for %s; set GH_HOST=%s\n' "$_named" "$_host" "$_named" >&2
+    exit 1
+  fi
+}
+refuse_other_host() {
+  _next=
+  _rest=
+  for _arg in "$@"; do
+    if [ -n "$_rest" ]; then   # after --, everything is an argument of its own
+      case "$_arg" in
+        http://*|https://*) check_host url "$_arg" ;;
+      esac
+      continue
+    fi
+    if [ -n "$_next" ]; then check_host "$_next" "$_arg"; _next=; continue; fi
+    case "$_arg" in
+      --hostname=*) check_host host "${_arg#--hostname=}" ;;
+      --hostname) _next=host ;;
+      -R=*) check_host repo "${_arg#-R=}" ;;
+      -R) _next=repo ;;
+      -R*) check_host repo "${_arg#-R}" ;;
+      --repo=*) check_host repo "${_arg#--repo=}" ;;
+      --repo) _next=repo ;;
+      http://*|https://*)
+        check_host url "$_arg" ;;
+      --) _rest=1 ;;
+    esac
+  done
+  if [ -n "${GH_REPO:-}" ]; then check_host repo "$GH_REPO"; fi
+}
+
+# Try to get credentials from the helper
+CRED_FILE="${AGENT_POD_CREDENTIALS_FILE:-/run/agent-pod/git-credentials}"
+
+# Only try to get credentials if the file exists
+if [ -f "$CRED_FILE" ]; then
+  # Check if helper is available
+  if ! command -v git-credential-agent-pod >/dev/null 2>&1; then
+    printf 'gh: git-credential-agent-pod helper not found\n' >&2
+    exit 1
+  fi
+  refuse_other_host "$@"
+  
+  # Ask the helper directly for the host-level credential
+  _output=$(
+    AGENT_POD_CREDENTIALS_FILE="$CRED_FILE" git-credential-agent-pod get <<EOF
+protocol=https
+host=$_host
+
+EOF
+  )
+  
+  # Extract password from helper output
+  _password=$(printf '%s' "$_output" | grep '^password=' | head -1 | cut -d= -f2-)
+  
+  if [ -n "$_password" ]; then
+    # Determine which variable to use based on the host
+    # GH_TOKEN for github.com and *.ghe.com, GH_ENTERPRISE_TOKEN for others
+    case "$_host" in
+      github.com|*.ghe.com)
+        GH_TOKEN="$_password" exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+        ;;
+      *)
+        GH_ENTERPRISE_TOKEN="$_password" exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+        ;;
+    esac
+  else
+    # File exists but no host-level credential for this host
+    printf 'gh: no host-level credential for %s in the git credentials file\n' "$_host" >&2
+    exit 1
+  fi
+else
+  # No credentials file, run the real gh unchanged
+  exec "${AGENT_POD_REAL_GH:-/usr/bin/gh}" "$@"
+fi
+GH_WRAPPER_EOF
+RUN chmod 755 /usr/local/bin/gh
+
 # Interactive-shell setup, appended to /etc/bash.bashrc. Only interactive bash sources this file, so
 # none of it touches the non-interactive `agent-pod <agent> ...` path. The dynamic, /etc/passwd-less
 # user has no $HOME/.bashrc of its own, so these baseline conveniences have to live in the system-wide
