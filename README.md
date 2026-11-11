@@ -173,7 +173,7 @@ The agent only sees files inside the project folder. Copy the screenshot into th
 
 ### Selecting text and opening links
 
-The agents' full-screen interfaces capture the mouse, so your terminal does not select text or open links on its own. Hold Shift to select and copy text (then `Ctrl+Shift+C`, or your terminal's copy shortcut), and Shift+Ctrl+click to open a link. This is how terminals treat any application that uses the mouse, not something agent-pod does.
+The agents' full-screen interfaces capture the mouse, so your terminal does not select text or open links on its own. Most Linux terminals (GNOME Terminal, Kitty, Konsole) let you override that with Shift: Shift-drag selects, `Ctrl+Shift+C` copies and Shift+Ctrl+click opens a link. Other terminals use another key, for example Option-drag in iTerm2; look for "mouse reporting" in your terminal's documentation. This is how terminals treat any application that uses the mouse, not something agent-pod does.
 
 ### Customizing the image
 
