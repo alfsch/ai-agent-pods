@@ -1873,12 +1873,31 @@ test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helpe
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" pr list -R https://other.ghe.com/o/r > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 1
 
-  # a URL that is the value of an option is no host selector: it does not change the API host
+  # a URL after a boolean flag or after -- is an argument like any other: which options take a value is not known
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" pr view --web https://other.ghe.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host other.ghe.com but the credential was looked up for github.com; set GH_HOST=other.ghe.com' "$CASE/err" || fail "expected error for a URL of another host after a boolean flag"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" pr view -- https://other.ghe.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  ! grep '^FAKE_GH' "$CASE/out" || fail "gh was run with a URL of another host after --"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" issue create --body https://other.ghe.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1   # the price of not knowing the options: a URL of the same token family is refused as a value too
+
+  # a URL on a host that never gets this token is no risk, whatever it is for gh: GH_TOKEN goes to github.com and *.ghe.com only
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" issue create --title test --body https://example.com > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 0
   grep '^FAKE_GH_TOKEN=S3CRET-TOKEN-URL1$' "$CASE/out" || fail "expected the token for a URL that is the value of --body"
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" repo edit --homepage https://docs.example.com > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 0
+
+  # for a token of a GitHub Enterprise Server every other host is of its family; github.com and *.ghe.com are not
+  printf 'https://user:S3CRET-TOKEN-URL2@ghes.example.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=ghes.example.com "$wrapper" pr view https://ghes2.example.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  grep 'gh: the command names host ghes2.example.com but the credential was looked up for ghes.example.com; set GH_HOST=ghes2.example.com' "$CASE/err" || fail "expected error for a URL of another server"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=ghes.example.com "$wrapper" issue create --body https://github.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  grep '^FAKE_GH_ENTERPRISE_TOKEN=S3CRET-TOKEN-URL2$' "$CASE/out" || fail "expected the server token for a URL of github.com"
 
   # --repo with the value as the next argument
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" pr list --repo other.ghe.com/o/r > "$CASE/out" 2>"$CASE/err"; RC=$?
@@ -2348,8 +2367,17 @@ fi' Dockerfile.base || rc=1
   mutate test_gh_wrapper '-R*) check_host repo "${_arg#-R}"' '-R*) :' Dockerfile.base || rc=1
   mutate test_gh_wrapper '--repo=*) check_host repo "${_arg#--repo=}"' '--repo=*) :' Dockerfile.base || rc=1
   mutate test_gh_wrapper '--repo) _next=repo' '--repo) :' Dockerfile.base || rc=1
-  mutate test_gh_wrapper 'case "$_prev" in -*) ;; *) check_host url "$_arg" ;; esac' ':' Dockerfile.base || rc=1
-  mutate test_gh_wrapper 'case "$_prev" in -*) ;; *) check_host url "$_arg" ;; esac' 'check_host url "$_arg"' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '      http://*|https://*)
+        check_host url "$_arg" ;;' '      http://*|https://*) : ;;' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '      --) _rest=1 ;;' '      --) break ;;' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '        http://*|https://*) check_host url "$_arg" ;;
+      esac
+      continue' '        http://*|https://*) : ;;
+      esac
+      continue' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '[ "$_fam_host" = "$_fam_named" ] || _named=' ':' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_fam_host=other; case "$_host" in github.com|*.ghe.com) _fam_host=dotcom ;; esac' '_fam_host=other' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_fam_named=other; case "$_named" in github.com|*.ghe.com) _fam_named=dotcom ;; esac' '_fam_named=other' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'if [ -n "${GH_REPO:-}" ]; then check_host repo "$GH_REPO"; fi' ':' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'http://*|https://*) _named="${2#*://}"; _named="${_named%%/*}" ;;
         *)' 'http://*|https://*) : ;;
