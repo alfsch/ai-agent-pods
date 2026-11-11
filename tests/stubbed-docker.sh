@@ -1883,6 +1883,21 @@ test_gh_wrapper() {   # the gh wrapper in the base image: reads token from helpe
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" issue create --body https://other.ghe.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 1   # the price of not knowing the options: a URL of the same token family is refused as a value too
 
+  # the host of a URL ends at /, ? or #, and has no user info or port in the way
+  for u in 'https://other.ghe.com?x=1' 'https://other.ghe.com#frag' 'https://u@other.ghe.com/o/r' 'https://other.ghe.com:8443/o/r'; do
+    PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" api "$u" > "$CASE/out" 2>"$CASE/err"; RC=$?
+    rc_is 1
+    ! grep '^FAKE_GH' "$CASE/out" || fail "gh was run with the URL $u of another host"
+  done
+
+  # what stands before the @ is user info, not the host
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" pr view https://other.ghe.com@github.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 0
+  printf 'https://user:S3CRET-TOKEN-URL3@other.ghe.com\n' > "$fixture"
+  PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" GH_HOST=other.ghe.com "$wrapper" pr view https://u@github.com/o/r/pull/1 > "$CASE/out" 2>"$CASE/err"; RC=$?
+  rc_is 1
+  printf 'https://user:S3CRET-TOKEN-URL1@github.com\n' > "$fixture"
+
   # a URL on a host that never gets this token is no risk, whatever it is for gh: GH_TOKEN goes to github.com and *.ghe.com only
   PATH="$CASE:$PATH" AGENT_POD_REAL_GH="$fake_gh" AGENT_POD_CREDENTIALS_FILE="$fixture" "$wrapper" issue create --title test --body https://example.com > "$CASE/out" 2>"$CASE/err"; RC=$?
   rc_is 0
@@ -2375,9 +2390,13 @@ fi' Dockerfile.base || rc=1
       continue' '        http://*|https://*) : ;;
       esac
       continue' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_named="${_named%%\?*}"; ' '' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_named="${_named%%#*}"' ':' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_named="${_named##*@}"' ':' Dockerfile.base || rc=1
+  mutate test_gh_wrapper 'case "${_named%%:*}" in' 'case "$_named" in' Dockerfile.base || rc=1
   mutate test_gh_wrapper '[ "$_fam_host" = "$_fam_named" ] || _named=' ':' Dockerfile.base || rc=1
   mutate test_gh_wrapper '_fam_host=other; case "$_host" in github.com|*.ghe.com) _fam_host=dotcom ;; esac' '_fam_host=other' Dockerfile.base || rc=1
-  mutate test_gh_wrapper '_fam_named=other; case "$_named" in github.com|*.ghe.com) _fam_named=dotcom ;; esac' '_fam_named=other' Dockerfile.base || rc=1
+  mutate test_gh_wrapper '_fam_named=other; case "${_named%%:*}" in github.com|*.ghe.com) _fam_named=dotcom ;; esac' '_fam_named=other' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'if [ -n "${GH_REPO:-}" ]; then check_host repo "$GH_REPO"; fi' ':' Dockerfile.base || rc=1
   mutate test_gh_wrapper 'http://*|https://*) _named="${2#*://}"; _named="${_named%%/*}" ;;
         *)' 'http://*|https://*) : ;;

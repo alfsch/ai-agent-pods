@@ -265,9 +265,10 @@ check_host() {   # <kind> <value>: refuse a value that names another host than $
   case "$1" in
     host) _named="$2" ;;
     url)
-      _named="${2#*://}"; _named="${_named%%/*}"
+      _named="${2#*://}"; _named="${_named%%/*}"; _named="${_named%%\?*}"; _named="${_named%%#*}"   # the authority ends at / ? or #
+      _named="${_named##*@}"   # no user info
       _fam_host=other; case "$_host" in github.com|*.ghe.com) _fam_host=dotcom ;; esac
-      _fam_named=other; case "$_named" in github.com|*.ghe.com) _fam_named=dotcom ;; esac
+      _fam_named=other; case "${_named%%:*}" in github.com|*.ghe.com) _fam_named=dotcom ;; esac   # a port does not change the family
       [ "$_fam_host" = "$_fam_named" ] || _named= ;;   # another family never gets this token
     repo)
       case "$2" in
