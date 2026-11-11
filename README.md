@@ -171,6 +171,10 @@ The design, the lifecycle invariants and how to test it: [docs/docker-sidecar.md
 
 The agent only sees files inside the project folder. Copy the screenshot into the project (e.g. a `tmp/` subfolder), copy it again from there so that the path on your clipboard is the in-project one, then paste.
 
+### Selecting text and opening links
+
+The agents' full-screen interfaces capture the mouse, so your terminal does not select text or open links on its own. Most Linux terminals (GNOME Terminal, Kitty, Konsole) let you override that with Shift: Shift-drag selects, `Ctrl+Shift+C` copies and Shift+Ctrl+click opens a link. Other terminals use another key, for example Option-drag in iTerm2; look for "mouse reporting" in your terminal's documentation. This is how terminals treat any application that uses the mouse, not something agent-pod does.
+
 ### Customizing the image
 
 Intentionally minimal: `node:26-slim` + `git` + `curl` + `less` + `jq` + `gh` + `yq` + the `docker` CLI (+ compose, buildx) + `python3` + `pip` + `venv` + `pdftotext` + `qpdf` + `tesseract` (English, German) + the agent. Anything else your projects need you add yourself: edit `Dockerfile.base` (the tools; build it locally with `AGENT_POD_BUILD_BASE=1 ./install.sh`, as the published base does not have your change) and re-run `install.sh`. Claude Code and Copilot CLI are told what is in the image, and what is not possible in the container (no root, Docker only with `DOCKER=1`), by [`pod-environment.md`](pod-environment.md), which the image carries where each tool reads it. Keep its "Tools on PATH" line in line with the Dockerfile; the integration tests check every tool on it.
