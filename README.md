@@ -259,6 +259,6 @@ Lists what it removes (the images, the base image tags too) and what it leaves (
 
 ### License and trademarks
 
-MIT, see [`LICENSE`](LICENSE). The cover image was generated with AI (Microsoft Bing Image Creator). Derived from [trekhleb/claude-pod](https://github.com/trekhleb/claude-pod) by Oleksii Trekhleb (MIT); the Copilot CLI and unified-launcher parts are by Alfred Schmid.
+MIT, see [`LICENSE`](LICENSE). The cover image was generated with AI (Microsoft Bing Image Creator); the social preview images in `assets/` are made from it. Derived from [trekhleb/claude-pod](https://github.com/trekhleb/claude-pod) by Oleksii Trekhleb (MIT); the Copilot CLI and unified-launcher parts are by Alfred Schmid.
 
 Claude Code is a product of Anthropic, PBC; Copilot CLI of GitHub, Inc. (Microsoft); goose is an open-source project (Apache-2.0) of the Agentic AI Foundation, formerly Block. None is redistributed here: `install.sh` fetches them from npm (goose: from its GitHub releases) at build time. This project is not affiliated with, endorsed by or sponsored by either company; their names are trademarks of their owners, used nominatively. No logos or brand assets are used.
