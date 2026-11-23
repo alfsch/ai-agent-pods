@@ -75,6 +75,10 @@ test that fails without it.
 - The helper `git-credential-agent-pod` is get-only: get-only because the mount is read-only and there is nothing to store; no prompt because the pod has no terminal. The scripts are inline in `Dockerfile.base` so that the hash of the base image is made from `Dockerfile.base` and `pod-environment.md` only; separate script files would have to be added to the hash calculation. The `gh` wrapper passes the token to the child process only, instead of using `GH_TOKEN`, to avoid putting the token in the environment where it could be leaked.
 - Renovate does not look in `tests/` by default (`config:recommended` ignores `**/tests/**`); `renovate.json` overrides `ignorePaths`
   so that the digest-pinned ShellCheck image in `tests/check.sh` is bumped, and `test_renovate_shellcheck` pins both.
+- Digest-only updates (a rebuild of the same tag) have no release timestamp, so the 3-day `minimumReleaseAge` with
+  `timestamp-required` would hold them for ever (`renovate/stability-days: pending`; the node, docker CLI and DIND digest
+  pull requests stayed open for weeks): a `packageRule` for `matchUpdateTypes: ["digest"]` makes them `timestamp-optional`, and
+  `test_renovate_digest_updates` pins it. Version updates keep their 3 days.
 - `install.sh` pulls the published base (`ghcr.io/alfsch/agent-pod-base:<hash of Dockerfile.base and
   pod-environment.md>`); a failed pull uses the local copy of that tag, then builds `Dockerfile.base` here (a registry
   rate limit or outage must not fail a start). Only the base is ever published: Claude Code and Copilot CLI are

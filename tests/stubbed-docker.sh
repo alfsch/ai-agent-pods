@@ -2171,6 +2171,15 @@ test_renovate_shellcheck() {   # Renovate can see the pinned ShellCheck image: t
   [[ "$out" =~ ^koalaman/shellcheck\ v[0-9.]+\ sha256:[0-9a-f]{64}$ ]] || fail "the manager does not find a digest-pinned koalaman/shellcheck tag in tests/check.sh (got: '$out')"
 }
 
+test_renovate_digest_updates() {   # a digest-only update has no release timestamp: the 3-day wait must not hold it, version updates keep it
+  command -v jq >/dev/null 2>&1 || fail "this test needs jq"
+  jq -e '.minimumReleaseAge == "3 days" and .minimumReleaseAgeBehaviour == "timestamp-required"' "$RENOVATEJSON" >/dev/null \
+    || fail "renovate.json no longer asks for a 3-day wait with a release timestamp for version updates"
+  # without this rule the node, docker CLI and DIND digest pull requests stay open for ever (renovate/stability-days pending)
+  jq -e '[.packageRules[] | select((.matchUpdateTypes // []) | index("digest")) | select(.minimumReleaseAgeBehaviour == "timestamp-optional")] | length == 1' "$RENOVATEJSON" >/dev/null \
+    || fail "no packageRule lets digest updates through without a release timestamp: they would be held for ever"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 # Jobs: the tests and the mutants run TEST_JOBS at a time (default: the CPUs, at most 8; 1 is one after the other). Their
 # output is printed in the order they were started, as they finish. No `wait -n` (Bash 3.2), so a slot is found by polling.
@@ -2616,6 +2625,10 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_renovate_shellcheck 'SHELLCHECK_IMAGE=(?<depName>koalaman/shellcheck):' 'SHELLCHECK_IMG=(?<depName>koalaman/shellcheck):' renovate.json || rc=1
   mutate test_renovate_shellcheck 'SHELLCHECK_IMAGE=koalaman/shellcheck:' 'SHELLCHECK_IMAGE=koalaman/shellcheck-alpine:' tests/check.sh || rc=1
   mutate test_renovate_shellcheck '@sha256:' '#sha256:' tests/check.sh || rc=1
+  mutate test_renovate_digest_updates $'"matchUpdateTypes": [\n        "digest"\n      ],\n      "minimumReleaseAgeBehaviour": "timestamp-optional"' $'"matchUpdateTypes": [\n        "digest"\n      ],\n      "minimumReleaseAgeBehaviour": "timestamp-required"' renovate.json || rc=1
+  mutate test_renovate_digest_updates $'"matchUpdateTypes": [\n        "digest"\n      ],' $'"matchUpdateTypes": [\n        "patch"\n      ],' renovate.json || rc=1
+  mutate test_renovate_digest_updates '  "minimumReleaseAgeBehaviour": "timestamp-required",' '  "minimumReleaseAgeBehaviour": "timestamp-optional",' renovate.json || rc=1
+  mutate test_renovate_digest_updates '  "minimumReleaseAge": "3 days",' '  "minimumReleaseAge": "0 days",' renovate.json || rc=1
   mutants_finish || rc=1
   return $rc
 }
