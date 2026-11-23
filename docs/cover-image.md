@@ -32,7 +32,26 @@ sphere inside with softly glowing eyes, dark charcoal background, a soft reflect
 - To make the spheres differ in shape as well, add: "left sphere with a rounder, friendlier face, right sphere with a
   more angular, technical look".
 
+## Social preview
+
+The picture GitHub shows when a link to the repository is shared is 1280×640 (2:1), a PNG, JPEG or GIF under 1 MB. It is
+uploaded by hand (repository Settings, Social preview); GitHub has no API for it. Both files in `assets/` are made from
+`docs/cover-image.webp`, which is 3:2, so they are not simply scaled. A 2:1 crop of the cover would leave about 30 px
+around the pods, which sites that trim link cards (LinkedIn does) would cut, so the whole picture is kept:
+
+- `assets/social-preview.png`: the picture only, scaled to 640 px high and centred, the sides filled with a blurred,
+  darkened copy of the cover (Gaussian blur 40, brightness 0.85) and the edges of the picture feathered over 90 px.
+- `assets/social-preview-title.png`: the same picture moved to the right, with the name and "Docker sandbox for AI coding
+  agents" on the left (Inter Bold 60 px and Regular 30 px, and a bar in the two pod colours, #D97757 to #8534F3). It reads
+  better as a small thumbnail, so upload this one. Its background is the cover's own left and right edge colours as a
+  gradient: a blurred copy of the whole scene showed the pods' reflections as glows next to the text.
+
+Both were made with Pillow in a pinned Python container (Inter from the Debian package `fonts-inter`, SIL Open Font
+License). They are derived from the AI-generated cover, so the README's statement about that applies to them as well.
+To change the text, redo the second file with the same sizes and keep the text clear of the left pod (it starts at about
+x = 590).
+
 ## Replacing the image
 
 Save the new picture as `docs/cover-image.webp` and convert it to `assets/cover.jpeg` (3:2, about 1250 px wide is
-enough; keep the names, or change the link in the README). The README's license section says that the image was generated with AI; keep that line.
+enough; keep the names, or change the link in the README). Redo the two social previews from the new picture as well. The README's license section says that the image was generated with AI; keep that line.
