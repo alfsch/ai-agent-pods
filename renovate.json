@@ -148,6 +148,13 @@
       "minimumReleaseAgeBehaviour": "timestamp-optional"
     },
     {
+      "description": "A digest-only update is a rebuild of the same tag and has no release timestamp, so the 3-day wait could never be met and, with timestamp-required, would hold it for ever (the node, docker CLI and DIND digest PRs stayed open for weeks): no wait for digests. Version updates keep their 3 days; the integration tests vouch for the tooling images",
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "minimumReleaseAgeBehaviour": "timestamp-optional"
+    },
+    {
       "description": "A new major of cosign can change the flags or the verification itself, and no check on the pull request runs a verification (the integration tests build the base there when it changed): a person reviews it",
       "matchDepNames": [
         "ghcr.io/sigstore/cosign/cosign"
