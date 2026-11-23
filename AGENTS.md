@@ -79,6 +79,10 @@ test that fails without it.
   `timestamp-required` would hold them for ever (`renovate/stability-days: pending`; the node, docker CLI and DIND digest
   pull requests stayed open for weeks): a `packageRule` for `matchUpdateTypes: ["digest"]` makes them `timestamp-optional`, and
   `test_renovate_digest_updates` pins it. Version updates keep their 3 days.
+- The docker CLI image (`Dockerfile.base`) and the DIND sidecar image (`agent-pod`) are one Renovate group, `docker images`: the same
+  repository and release train, and one pull request makes the integration tests run the CLI against the sidecar that ships with
+  it (two pull requests tested each against the other's old digest). The node image has a group of its own, for its version
+  literals. `test_renovate_docker_group` pins the rule and both pins.
 - `install.sh` pulls the published base (`ghcr.io/alfsch/agent-pod-base:<hash of Dockerfile.base and
   pod-environment.md>`); a failed pull uses the local copy of that tag, then builds `Dockerfile.base` here (a registry
   rate limit or outage must not fail a start). Only the base is ever published: Claude Code and Copilot CLI are

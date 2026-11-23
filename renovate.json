@@ -79,6 +79,16 @@
       "groupName": "node base image"
     },
     {
+      "description": "Bump the docker CLI image of Dockerfile.base and the DIND sidecar image of the launcher together: one upstream repository and release train, and the integration tests then run the CLI against the sidecar that ships with it (as two pull requests, the first one to merge was tested against the other's old digest)",
+      "matchDepNames": [
+        "docker"
+      ],
+      "matchDatasources": [
+        "docker"
+      ],
+      "groupName": "docker images"
+    },
+    {
       "description": "Pin the node base image of Dockerfile.base by digest: a tag like 24-slim is republished under the same name, so without the digest Renovate would never see those rebuilds. Only the Dockerfile; the tag literals in uninstall.sh and the README stay plain tags",
       "matchDepNames": [
         "node"

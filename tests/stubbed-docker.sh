@@ -2180,6 +2180,15 @@ test_renovate_digest_updates() {   # a digest-only update has no release timesta
     || fail "no packageRule lets digest updates through without a release timestamp: they would be held for ever"
 }
 
+test_renovate_docker_group() {   # the docker CLI (Dockerfile.base) and the DIND sidecar (launcher) pins are one Renovate group: the integration tests run them together
+  command -v jq >/dev/null 2>&1 || fail "this test needs jq"
+  jq -e '[.packageRules[] | select((.matchDepNames // []) | index("docker")) | select((.matchDatasources // []) | index("docker")) | select((.groupName // "") | length > 0)] | length == 1' "$RENOVATEJSON" >/dev/null \
+    || fail "renovate.json has no group for the docker repository (matchDepNames docker, datasource docker): the CLI and sidecar bumps are tested one at a time again"
+  # what the rule groups: both pins come from the docker repository, by tag and digest
+  grep -qE -- '--from=docker:[^ ]+@sha256:[0-9a-f]{64}' "$DOCKERFILE_BASE" || fail "Dockerfile.base no longer pins the docker CLI image of the docker repository by tag and digest"
+  grep -qE 'docker:[^ ]*dind-rootless@sha256:[0-9a-f]{64}' "$LAUNCHER" || fail "the launcher no longer pins the DIND sidecar image of the docker repository by tag and digest"
+}
+
 # ---- mutants: each must make its test fail, proving the test discriminates -----------------------------
 # Jobs: the tests and the mutants run TEST_JOBS at a time (default: the CPUs, at most 8; 1 is one after the other). Their
 # output is printed in the order they were started, as they finish. No `wait -n` (Bash 3.2), so a slot is found by polling.
@@ -2629,6 +2638,9 @@ done' tests/published-base-tag.sh || rc=1
   mutate test_renovate_digest_updates $'"matchUpdateTypes": [\n        "digest"\n      ],' $'"matchUpdateTypes": [\n        "patch"\n      ],' renovate.json || rc=1
   mutate test_renovate_digest_updates '  "minimumReleaseAgeBehaviour": "timestamp-required",' '  "minimumReleaseAgeBehaviour": "timestamp-optional",' renovate.json || rc=1
   mutate test_renovate_digest_updates '  "minimumReleaseAge": "3 days",' '  "minimumReleaseAge": "0 days",' renovate.json || rc=1
+  mutate test_renovate_docker_group '"groupName": "docker images"' '"groupName": ""' renovate.json || rc=1
+  mutate test_renovate_docker_group $'      "matchDepNames": [\n        "docker"\n      ],\n      "matchDatasources": [\n        "docker"\n      ],\n      "groupName": "docker images"' $'      "matchDepNames": [\n        "dockerx"\n      ],\n      "matchDatasources": [\n        "docker"\n      ],\n      "groupName": "docker images"' renovate.json || rc=1
+  mutate test_renovate_docker_group 'dind-rootless@sha256:' 'dind-rootless-sha256:' || rc=1
   mutants_finish || rc=1
   return $rc
 }
